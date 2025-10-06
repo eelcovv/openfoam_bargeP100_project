@@ -3,5 +3,7 @@ python batch_process_barges.py \
   --out-root barge \
   --case-prefix barge_ \
   --np 16 \
-  --mpirun "mpirun --bind-to none --map-by slot"
+  --mpirun "mpirun --bind-to none --map-by slot"  \
+  --start-solver
+
 

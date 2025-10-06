@@ -112,6 +112,23 @@ def run_of(cmd: str, case_dir: Path, log_name: Optional[str] = None) -> None:
     _run_and_log(argv, case_dir, log_file)
 
 
+def _containerize_path(p: Path, case_dir: Path) -> str:
+    """
+    Return a path string appropriate for where the command runs:
+    - with of-run: convert host path under case_dir -> '/work/<rel>'
+    - native: return absolute host path
+    """
+    if USE_OF_RUN:
+        try:
+            rel = p.relative_to(case_dir)
+            return f"/work/{rel.as_posix()}"
+        except ValueError:
+            # Not under case_dir; fallback to basename (works since -w /work)
+            return p.name
+    else:
+        return str(p)
+
+
 def run_mpi(
     cmd: str,
     case_dir: Path,
@@ -124,6 +141,7 @@ def run_mpi(
     """
     Run an MPI OpenFOAM command from the CASE ROOT, with robust argv construction.
     If no hostfile is provided, auto-create one in the case_dir with localhost slots=np.
+    Ensures the hostfile path is valid inside the container (of-run).
     """
     # Auto-create hostfile if not supplied
     auto_hostfile: Optional[Path] = None
@@ -136,7 +154,8 @@ def run_mpi(
     parts += shlex.split(mpirun_cmd)  # e.g., "mpirun --bind-to none --map-by slot"
     parts += ["-np", str(np)]
     if hostfile:
-        parts += ["--hostfile", str(hostfile)]
+        hf_for_cmd = _containerize_path(hostfile, case_dir)
+        parts += ["--hostfile", hf_for_cmd]
     if extra:
         parts += shlex.split(extra)  # any extra mpirun flags
     parts += shlex.split(cmd)  # e.g., "snappyHexMesh -parallel -overwrite"

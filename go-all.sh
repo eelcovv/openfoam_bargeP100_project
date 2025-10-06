@@ -4,6 +4,8 @@ python batch_process_barges.py \
   --case-prefix barge_ \
   --np 16 \
   --mpirun "mpirun --bind-to none --map-by slot"  \
-  --start-solver
+  --start-existing --ensure-meshed
+
+#  --start-solver
 
 

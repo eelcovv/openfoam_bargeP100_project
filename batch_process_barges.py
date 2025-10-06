@@ -295,12 +295,34 @@ roots           ();
 
 
 def parse_application(case_dir: Path) -> str:
-    ctrl = (case_dir / "system" / "controlDict").read_text()
+    """Parse the 'application' entry from system/controlDict.
+    Allows for flexible spacing and comments, and supports environment override.
+    """
+    # 1. Allow override via environment variable
+    app_env = os.environ.get("OF_APPLICATION")
+    if app_env:
+        return app_env
+
+    # 2. Read the controlDict
+    ctrl_path = case_dir / "system" / "controlDict"
+    if not ctrl_path.exists():
+        raise FileNotFoundError(f"Missing controlDict: {ctrl_path}")
+
+    ctrl = ctrl_path.read_text(encoding="utf-8")
+
+    # 3. Remove C/C++-style comments (// and /* */)
+    ctrl = re.sub(r"//.*$", "", ctrl, flags=re.MULTILINE)
+    ctrl = re.sub(r"/\*.*?\*/", "", ctrl, flags=re.DOTALL)
+
+    # 4. Search for the 'application' keyword (case-sensitive)
     m = re.search(
-        r"^\\s*application\\s+([A-Za-z0-9_./+-]+)\\s*;", ctrl, flags=re.MULTILINE
+        r"^\s*application\s+([A-Za-z0-9_./+-]+)\s*;", ctrl, flags=re.MULTILINE
     )
+
+    # 5. Handle missing match gracefully
     if not m:
-        raise RuntimeError("Could not find application in controlDict.")
+        raise RuntimeError(f"Could not find 'application' entry in {ctrl_path}")
+
     return m.group(1)
 
 
@@ -404,6 +426,11 @@ def parse_angles(spec: str) -> List[float]:
     return [float(tok.strip()) for tok in spec.split(",") if tok.strip()]
 
 
+def is_meshed(case_dir: Path) -> bool:
+    """Return True if the case has a generated polyMesh (points file exists)."""
+    return (case_dir / "constant" / "polyMesh" / "points").exists()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Yaw sweep with logging (Docker via of-run or native)."
@@ -435,6 +462,12 @@ def main():
         action="store_true",
         help="Phase B: start solvers for existing cases under --out-root.",
     )
+    # --- Add this new CLI flag (in parse_args) ---
+    parser.add_argument(
+        "--ensure-meshed",
+        action="store_true",
+        help="In --start-existing mode: create/mesh missing cases using --template and --angles.",
+    )
     parser.add_argument(
         "--start-solver",
         action="store_true",
@@ -451,7 +484,40 @@ def main():
     mode = "Docker (of-run)" if USE_OF_RUN else "native OpenFOAM"
     print(f"[INFO] Mode: {mode}")
 
+    # --- Replace the current --start-existing block in main() with this version ---
     if args.start_existing:
+        # When ensuring meshed: we need a template and angles to prepare missing cases.
+        if args.ensure_meshed:
+            if args.template is None:
+                raise SystemExit("--template is required when using --ensure-meshed.")
+            template = args.template.resolve()
+            # Reuse the same angle parser & prefix to know what should exist
+            angles = parse_angles(args.angles)
+            for ang in angles:
+                case_name = make_case_name(args.case_prefix, ang)
+                case_dir = out_root / case_name
+                # Decide whether this case needs preparation (no system/controlDict or no polyMesh)
+                needs_mesh = not (
+                    case_dir / "system" / "controlDict"
+                ).exists() or not is_meshed(case_dir)
+
+                if needs_mesh:
+                    print(
+                        f"\n=== Missing or unmeshed case: {case_name} → preparing/meshing ==="
+                    )
+                    prepare_and_mesh_angle(
+                        template=template,
+                        out_root=out_root,
+                        angle=ang,
+                        pivot=(args.x0, args.y0, args.z0),
+                        np=args.np,
+                        mpirun_cmd=args.mpirun,
+                        hostfile=args.hostfile.resolve() if args.hostfile else None,
+                        mpirun_extra=args.mpirun_extra.strip(),
+                        case_prefix=args.case_prefix,
+                    )
+
+        # After optional prepare/mesh, start solvers for whatever exists under out_root
         start_solver_for_existing_cases(
             out_root=out_root,
             case_prefix=args.case_prefix,

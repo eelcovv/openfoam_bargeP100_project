@@ -67,18 +67,36 @@ def prepend_of_run(argv: List[str]) -> List[str]:
 def _run_and_log(argv: List[str], work_dir: Path, log_file: Optional[Path]) -> None:
     """
     Run command (argv) in work_dir. If log_file is given, capture stdout/stderr to it.
-    The container working dir (with of-run) will be the given work_dir (mounted as /work).
+    On failure, print a useful tail of the log to stderr for quick diagnostics.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    if log_file is None:
-        res = subprocess.run(argv, cwd=str(work_dir))
-    else:
-        with open(log_file, "ab", buffering=0) as f:
-            res = subprocess.run(
-                argv, cwd=str(work_dir), stdout=f, stderr=subprocess.STDOUT
-            )
-    if res.returncode != 0:
-        raise RuntimeError(f"Command failed ({res.returncode}): {' '.join(argv)}")
+    try:
+        if log_file is None:
+            res = subprocess.run(argv, cwd=str(work_dir))
+        else:
+            with open(log_file, "ab", buffering=0) as f:
+                res = subprocess.run(
+                    argv, cwd=str(work_dir), stdout=f, stderr=subprocess.STDOUT
+                )
+        if res.returncode != 0:
+            raise subprocess.CalledProcessError(res.returncode, argv)
+    except subprocess.CalledProcessError as e:
+        # Best effort: show tail of log (if any)
+        if log_file and log_file.exists():
+            try:
+                print(f"\n--- tail of {log_file.name} ---", flush=True)
+                with open(log_file, "rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 8192))  # ~ last 8KB
+                    tail = f.read().decode(errors="replace")
+                print(tail, flush=True)
+                print(f"--- end of {log_file.name} ---\n", flush=True)
+            except Exception:
+                pass
+        raise RuntimeError(
+            f"Command failed ({e.returncode}): {' '.join(argv)}"
+        ) from None
 
 
 def run_of(cmd: str, case_dir: Path, log_name: Optional[str] = None) -> None:
@@ -220,10 +238,11 @@ surfaces
 """)
 
 
-def ensure_decompose_dict(case_dir: Path, np: int) -> None:
+def ensure_decompose_dict(case_dir: Path, np: int, method: str = "scotch") -> None:
     sys_dir = case_dir / "system"
     sys_dir.mkdir(exist_ok=True)
     dpath = sys_dir / "decomposeParDict"
+
     if not dpath.exists():
         dpath.write_text(f"""/*--------------------------------*- C++ -*----------------------------------*\\
 | decomposeParDict (auto-generated)                                            |
@@ -236,18 +255,16 @@ FoamFile
     object decomposeParDict;
 }}
 numberOfSubdomains {np};
-method scotch;
-distributed no;
-roots ();
+method          {method};
+distributed     no;
+roots           ();
 """)
         return
+
     txt = dpath.read_text()
-    if "numberOfSubdomains" in txt:
-        txt = re.sub(
-            r"numberOfSubdomains\\s+\\d+\\s*;", f"numberOfSubdomains {np};", txt
-        )
-    else:
-        txt = f"numberOfSubdomains {np};\n" + txt
+    # OVERRIDE aantal subdomains en method, behoud overige coeffs
+    txt = re.sub(r"numberOfSubdomains\s+\d+\s*;", f"numberOfSubdomains {np};", txt)
+    txt = re.sub(r"method\s+\w+\s*;", f"method          {method};", txt)
     dpath.write_text(txt)
 
 

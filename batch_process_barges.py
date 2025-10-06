@@ -123,7 +123,15 @@ def run_mpi(
 ) -> None:
     """
     Run an MPI OpenFOAM command from the CASE ROOT, with robust argv construction.
+    If no hostfile is provided, auto-create one in the case_dir with localhost slots=np.
     """
+    # Auto-create hostfile if not supplied
+    auto_hostfile: Optional[Path] = None
+    if hostfile is None:
+        auto_hostfile = case_dir / "hostfile.mpi"
+        auto_hostfile.write_text(f"localhost slots={np}\n")
+        hostfile = auto_hostfile
+
     parts: List[str] = []
     parts += shlex.split(mpirun_cmd)  # e.g., "mpirun --bind-to none --map-by slot"
     parts += ["-np", str(np)]
@@ -166,9 +174,8 @@ def rotate_stl_with_surfaceTransformPoints(
     tmp2 = f"constant/triSurface/.tmp_rot2_{yaw_deg}.stl"
 
     x0, y0, z0 = pivot
-    import math
-
-    yaw_rad = math.radians(yaw_deg)
+    # import math
+    # yaw_rad = math.radians(yaw_deg)
 
     def rof(argv: List[str]) -> None:
         av = (["of-run"] + argv) if USE_OF_RUN else argv
@@ -179,7 +186,7 @@ def rotate_stl_with_surfaceTransformPoints(
     # 1) translate (-pivot)
     rof(["surfaceTransformPoints", "-translate", f"({-x0} {-y0} {-z0})", src_rel, tmp1])
     # 2) rollPitchYaw (radians)
-    rof(["surfaceTransformPoints", "-rollPitchYaw", f"(0 0 {yaw_rad})", tmp1, tmp2])
+    rof(["surfaceTransformPoints", "-rollPitchYaw", f"(0 0 {yaw_deg})", tmp1, tmp2])
     # 3) translate back (+pivot) -> direct overschrijven van hull.stl
     rof(["surfaceTransformPoints", "-translate", f"({x0} {y0} {z0})", tmp2, src_rel])
 

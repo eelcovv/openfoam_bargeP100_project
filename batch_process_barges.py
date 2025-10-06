@@ -1,30 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Universal yaw-sweep script with logging and two-phase runs.
+Universal yaw-sweep with logging, two-phase runs, and robust STL rotation.
 
-Phase A (meshing only):
+Changes in this version:
+- Always run commands from the CASE ROOT (no chdir to triSurface).
+- Pass STL paths relative to the case root (e.g. 'constant/triSurface/hull.stl').
+- Pass vector arguments WITHOUT quotes, e.g. (-50 0 0).
+- Build argv lists explicitly for rotation to avoid quoting issues through of-run.
+- Still supports: mesh-only phase and later start-existing phase.
+- Auto-detects `of-run` (Docker) vs native OpenFOAM.
+
+Pipeline (phase A, --mesh-only):
   clone → rotate STL → surfaceFeatureExtract → blockMesh →
   decomposePar → mpirun snappyHexMesh -parallel -overwrite →
   reconstructParMesh -constant → decomposePar -force
-(Use --mesh-only)
 
-Phase B (start existing solvers later):
-  For each prepared case dir, run: mpirun <application> -parallel
-(Use --start-existing)
-
-Works with:
-- Docker via `of-run` (auto-detected)
-- Native OpenFOAM (no container), if OF binaries are on PATH
+Phase B (--start-existing):
+  Iterate prepared cases and run: mpirun <application> -parallel
 """
 
 import argparse
+import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+# ---------------------------- Logging setup ----------------------------
+
+LOG = logging.getLogger("yaw_sweep")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # ---------------------------- Environment detection ----------------------------
 
@@ -37,28 +46,36 @@ def has_of_run() -> bool:
 USE_OF_RUN = has_of_run()
 
 
-def build_cmd(base: str) -> List[str]:
-    """Return the command list, prefixed with 'of-run' when available."""
-    if USE_OF_RUN:
-        return ["of-run", *base.split()]
-    # Native: run as-is via shell if we used pipes; here we pass a pure argv list.
-    return base.split()
+def build_cmd_argv(command: str) -> List[str]:
+    """
+    Build argv for a command line.
+    - Uses shlex.split() so quoted segments remain a single arg.
+    - Prepends 'of-run' if available (Docker path).
+    """
+    argv = shlex.split(command)
+    return (["of-run"] + argv) if USE_OF_RUN else argv
+
+
+def prepend_of_run(argv: List[str]) -> List[str]:
+    """Prepend 'of-run' when available to a prebuilt argv list."""
+    return (["of-run"] + argv) if USE_OF_RUN else argv
 
 
 # ---------------------------- Command runners with logging ----------------------------
 
 
-def _run_and_log(argv: List[str], case_dir: Path, log_file: Optional[Path]) -> None:
+def _run_and_log(argv: List[str], work_dir: Path, log_file: Optional[Path]) -> None:
     """
-    Run command (argv) in case_dir. If log_file is given, capture both stdout/stderr to it.
+    Run command (argv) in work_dir. If log_file is given, capture stdout/stderr to it.
+    The container working dir (with of-run) will be the given work_dir (mounted as /work).
     """
-    case_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
     if log_file is None:
-        res = subprocess.run(argv, cwd=str(case_dir))
+        res = subprocess.run(argv, cwd=str(work_dir))
     else:
         with open(log_file, "ab", buffering=0) as f:
             res = subprocess.run(
-                argv, cwd=str(case_dir), stdout=f, stderr=subprocess.STDOUT
+                argv, cwd=str(work_dir), stdout=f, stderr=subprocess.STDOUT
             )
     if res.returncode != 0:
         raise RuntimeError(f"Command failed ({res.returncode}): {' '.join(argv)}")
@@ -66,9 +83,9 @@ def _run_and_log(argv: List[str], case_dir: Path, log_file: Optional[Path]) -> N
 
 def run_of(cmd: str, case_dir: Path, log_name: Optional[str] = None) -> None:
     """
-    Run a (serial) OpenFOAM command in case_dir, logging to log_name if provided.
+    Run a serial OpenFOAM command in CASE ROOT, logging to log_name if provided.
     """
-    argv = build_cmd(cmd)
+    argv = build_cmd_argv(cmd)
     log_file = (case_dir / log_name) if log_name else None
     print(
         f"[RUN] (in {case_dir}) {' '.join(argv)}"
@@ -87,15 +104,18 @@ def run_mpi(
     log_name: Optional[str],
 ) -> None:
     """
-    Run an MPI command inside the OF environment (via of-run or native).
+    Run an MPI OpenFOAM command from the CASE ROOT, with robust argv construction.
     """
-    parts = [mpirun_cmd, f"-np {np}"]
+    parts: List[str] = []
+    parts += shlex.split(mpirun_cmd)  # e.g., "mpirun --bind-to none --map-by slot"
+    parts += ["-np", str(np)]
     if hostfile:
         parts += ["--hostfile", str(hostfile)]
     if extra:
-        parts += extra.split()
-    parts += cmd.split()
-    argv = build_cmd(" ".join(parts))
+        parts += shlex.split(extra)  # any extra mpirun flags
+    parts += shlex.split(cmd)  # e.g., "snappyHexMesh -parallel -overwrite"
+
+    argv = prepend_of_run(parts)
     log_file = (case_dir / log_name) if log_name else None
     print(
         f"[RUN] (in {case_dir}) {' '.join(argv)}"
@@ -104,7 +124,7 @@ def run_mpi(
     _run_and_log(argv, case_dir, log_file)
 
 
-# ---------------------------- STL rotation ----------------------------
+# ---------------------------- STL rotation (robust) ----------------------------
 
 
 def rotate_stl_with_surfaceTransformPoints(
@@ -113,36 +133,58 @@ def rotate_stl_with_surfaceTransformPoints(
     yaw_deg: float,
     pivot: Tuple[float, float, float] = (50.0, 0.0, 0.0),
 ) -> None:
-    """Rotate STL around z-axis by yaw_deg degrees about pivot using surfaceTransformPoints, logging to log.rotate."""
-    stl_path = case_dir / stl_rel
-    tri_dir = stl_path.parent
-    tri_dir.mkdir(parents=True, exist_ok=True)
+    """
+    Rotate STL around z-axis using surfaceTransformPoints.
+    IMPORTANT:
+      - Run from CASE ROOT (NOT triSurface).
+      - Use paths relative to case root (e.g. constant/triSurface/hull.stl).
+      - Pass vector WITHOUT quotes: (-dx -dy -dz)
+    Logs to case_root/log.rotate.
+    """
+    # Paths relative to CASE ROOT, because container -w=/work will be CASE ROOT
+    src_rel = stl_rel.as_posix()  # "constant/triSurface/hull.stl"
+    tmp1 = f"constant/triSurface/.tmp_rot1_{yaw_deg}.stl"
+    tmp2 = f"constant/triSurface/.tmp_rot2_{yaw_deg}.stl"
+    tmp3 = f"constant/triSurface/.tmp_rot3_{yaw_deg}.stl"
 
-    src_name = stl_path.name
-    tmp1 = f".tmp_rot1_{yaw_deg}.stl"
-    tmp2 = f".tmp_rot2_{yaw_deg}.stl"
-    tmp3 = f".tmp_rot3_{yaw_deg}.stl"
+    if not (case_dir / src_rel).exists():
+        raise FileNotFoundError(f"Missing STL: {case_dir / src_rel}")
 
     x0, y0, z0 = pivot
     import math
 
     yaw_rad = math.radians(yaw_deg)
 
-    # We run in tri_dir, but still resolve logs in the case root for simplicity.
-    def rof(local_cmd: str):
-        argv = build_cmd(local_cmd)
+    # Build explicit argv lists so parentheses are preserved as a single token.
+    # 1) translate (-pivot)
+    argv1 = [
+        "surfaceTransformPoints",
+        "-translate",
+        f"({-x0} {-y0} {-z0})",
+        src_rel,
+        tmp1,
+    ]
+    # 2) rotate (radians) rollPitchYaw
+    argv2 = ["surfaceTransformPoints", "-rollPitchYaw", f"(0 0 {yaw_rad})", tmp1, tmp2]
+    # 3) translate back (+pivot)
+    argv3 = ["surfaceTransformPoints", "-translate", f"({x0} {y0} {z0})", tmp2, tmp3]
+
+    def rof(argv: List[str]) -> None:
+        argv2 = prepend_of_run(argv)
         logf = case_dir / "log.rotate"
-        print(f"[RUN] (in {tri_dir}) {' '.join(argv)}  -> log.rotate")
-        _run_and_log(argv, tri_dir, logf)
+        print(f"[RUN] (in {case_dir}) {' '.join(argv2)}  -> log.rotate")
+        _run_and_log(argv2, case_dir, logf)
 
-    rof(f"surfaceTransformPoints -translate '({-x0} {-y0} {-z0})' {src_name} {tmp1}")
-    rof(f"surfaceTransformPoints -rollPitchYaw '(0 0 {yaw_rad})' {tmp1} {tmp2}")
-    rof(f"surfaceTransformPoints -translate '({x0} {y0} {z0})' {tmp2} {tmp3}")
+    rof(argv1)
+    rof(argv2)
+    rof(argv3)
 
-    (tri_dir / tmp3).replace(stl_path)
+    # Move tmp3 over the original
+    (case_dir / tmp3).replace(case_dir / src_rel)
+    # Clean up tmp files if present
     for t in (tmp1, tmp2):
         try:
-            (tri_dir / t).unlink()
+            (case_dir / t).unlink()
         except FileNotFoundError:
             pass
 
@@ -152,7 +194,8 @@ def rotate_stl_with_surfaceTransformPoints(
 
 def clone_template(template: Path, destination: Path) -> None:
     if destination.exists():
-        raise FileExistsError(f"Destination already exists: {destination}")
+        LOG.info("Destination %s exists, skipping clone.", destination)
+        return
 
     def _ignore(dirpath, names):
         ignore = []
@@ -300,15 +343,11 @@ def start_solver_for_existing_cases(
     hostfile: Optional[Path],
     mpirun_extra: str,
 ) -> None:
-    """
-    Iterate all subdirs in out_root starting with case_prefix and launch solver in parallel.
-    """
     for sub in sorted(out_root.iterdir()):
         if not sub.is_dir():
             continue
         if not sub.name.startswith(case_prefix):
             continue
-        # Make sure it looks like a prepared case
         if not (sub / "system" / "controlDict").exists():
             continue
         app = parse_application(sub)
@@ -352,7 +391,6 @@ def main():
     parser.add_argument("--mpirun", type=str, default="mpirun")
     parser.add_argument("--mpirun-extra", type=str, default="")
     parser.add_argument("--hostfile", type=Path, default=None)
-    # Phase control:
     parser.add_argument(
         "--mesh-only",
         action="store_true",
@@ -363,7 +401,6 @@ def main():
         action="store_true",
         help="Phase B: start solvers for existing cases under --out-root.",
     )
-    # Legacy flag (mutually exclusive with mesh-only/start-existing)
     parser.add_argument(
         "--start-solver",
         action="store_true",
@@ -380,7 +417,6 @@ def main():
     mode = "Docker (of-run)" if USE_OF_RUN else "native OpenFOAM"
     print(f"[INFO] Mode: {mode}")
 
-    # Phase B only
     if args.start_existing:
         start_solver_for_existing_cases(
             out_root=out_root,
@@ -393,7 +429,6 @@ def main():
         print("\nAll existing cases started.")
         return
 
-    # Phase A (prepare/mesh) – requires template and angles
     if args.template is None:
         raise SystemExit(
             "--template is required for meshing phase (omit it when using --start-existing)."
@@ -401,7 +436,6 @@ def main():
     template = args.template.resolve()
     angles = parse_angles(args.angles)
 
-    # Decide solver start for Phase A
     start_solver = False
     if args.mesh_only:
         start_solver = False

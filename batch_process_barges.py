@@ -134,54 +134,38 @@ def rotate_stl_with_surfaceTransformPoints(
     pivot: Tuple[float, float, float] = (50.0, 0.0, 0.0),
 ) -> None:
     """
-    Rotate STL around z-axis using surfaceTransformPoints.
-    IMPORTANT:
-      - Run from CASE ROOT (NOT triSurface).
-      - Use paths relative to case root (e.g. constant/triSurface/hull.stl).
-      - Pass vector WITHOUT quotes: (-dx -dy -dz)
-    Logs to case_root/log.rotate.
+    Roteer STL rond de z-as.
+    - Draai alles vanuit de CASE ROOT (cwd=case_dir)
+    - Gebruik paden relatief aan de case (bv. constant/triSurface/hull.stl)
+    - Schrijf de laatste stap DIRECT naar hull.stl (geen replace meer)
+    - Logt naar log.rotate
     """
-    # Paths relative to CASE ROOT, because container -w=/work will be CASE ROOT
     src_rel = stl_rel.as_posix()  # "constant/triSurface/hull.stl"
-    tmp1 = f"constant/triSurface/.tmp_rot1_{yaw_deg}.stl"
-    tmp2 = f"constant/triSurface/.tmp_rot2_{yaw_deg}.stl"
-    tmp3 = f"constant/triSurface/.tmp_rot3_{yaw_deg}.stl"
-
     if not (case_dir / src_rel).exists():
         raise FileNotFoundError(f"Missing STL: {case_dir / src_rel}")
+
+    tmp1 = f"constant/triSurface/.tmp_rot1_{yaw_deg}.stl"
+    tmp2 = f"constant/triSurface/.tmp_rot2_{yaw_deg}.stl"
 
     x0, y0, z0 = pivot
     import math
 
     yaw_rad = math.radians(yaw_deg)
 
-    # Build explicit argv lists so parentheses are preserved as a single token.
-    # 1) translate (-pivot)
-    argv1 = [
-        "surfaceTransformPoints",
-        "-translate",
-        f"({-x0} {-y0} {-z0})",
-        src_rel,
-        tmp1,
-    ]
-    # 2) rotate (radians) rollPitchYaw
-    argv2 = ["surfaceTransformPoints", "-rollPitchYaw", f"(0 0 {yaw_rad})", tmp1, tmp2]
-    # 3) translate back (+pivot)
-    argv3 = ["surfaceTransformPoints", "-translate", f"({x0} {y0} {z0})", tmp2, tmp3]
-
     def rof(argv: List[str]) -> None:
-        argv2 = prepend_of_run(argv)
+        av = (["of-run"] + argv) if USE_OF_RUN else argv
         logf = case_dir / "log.rotate"
-        print(f"[RUN] (in {case_dir}) {' '.join(argv2)}  -> log.rotate")
-        _run_and_log(argv2, case_dir, logf)
+        print(f"[RUN] (in {case_dir}) {' '.join(av)}  -> log.rotate")
+        _run_and_log(av, case_dir, logf)
 
-    rof(argv1)
-    rof(argv2)
-    rof(argv3)
+    # 1) translate (-pivot)
+    rof(["surfaceTransformPoints", "-translate", f"({-x0} {-y0} {-z0})", src_rel, tmp1])
+    # 2) rollPitchYaw (radians)
+    rof(["surfaceTransformPoints", "-rollPitchYaw", f"(0 0 {yaw_rad})", tmp1, tmp2])
+    # 3) translate back (+pivot) -> direct overschrijven van hull.stl
+    rof(["surfaceTransformPoints", "-translate", f"({x0} {y0} {z0})", tmp2, src_rel])
 
-    # Move tmp3 over the original
-    (case_dir / tmp3).replace(case_dir / src_rel)
-    # Clean up tmp files if present
+    # opruimen
     for t in (tmp1, tmp2):
         try:
             (case_dir / t).unlink()
@@ -312,7 +296,7 @@ def prepare_and_mesh_angle(
     run_of("blockMesh", case_dir, log_name="log.blockMesh")
 
     ensure_decompose_dict(case_dir, np)
-    run_of("decomposePar", case_dir, log_name="log.decomposePar")
+    run_of("decomposePar -force", case_dir, log_name="log.decomposePar")
 
     run_mpi(
         "snappyHexMesh -parallel -overwrite",

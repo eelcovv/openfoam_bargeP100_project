@@ -313,6 +313,13 @@ def prepare_and_mesh_angle(
     run_of("blockMesh", case_dir, log_name="log.blockMesh")
 
     ensure_decompose_dict(case_dir, np)
+
+    # sanity check
+    dc_txt = (case_dir / "system" / "decomposeParDict").read_text()
+    m = re.search(r"numberOfSubdomains\s+(\d+)\s*;", dc_txt)
+    if not m or int(m.group(1)) != np:
+        raise RuntimeError(f"numberOfSubdomains not set to {np} in decomposeParDict")
+
     run_of("decomposePar -force", case_dir, log_name="log.decomposePar")
 
     run_mpi(

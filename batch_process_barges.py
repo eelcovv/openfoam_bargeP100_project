@@ -1,20 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Prepare and (optionally) run a yaw sweep with parallel snappyHexMesh and solver.
+Universal yaw-sweep script with logging and two-phase runs.
 
-Per angle:
-  1) Clone template case
-  2) Rotate constant/triSurface/hull.stl around z-axis about (x0,y0,z0)
-  3) Ensure surfaceFeatureExtractDict, then run surfaceFeatureExtract (serial)
-  4) Run blockMesh (serial)
-  5) Ensure/update decomposeParDict with numberOfSubdomains = --np
-  6) decomposePar
-  7) mpirun: snappyHexMesh -parallel -overwrite
-  8) reconstructParMesh -constant
-  9) decomposePar -force
- 10) mpirun: <application from controlDict> -parallel   (optional via --start-solver)
+Phase A (meshing only):
+  clone → rotate STL → surfaceFeatureExtract → blockMesh →
+  decomposePar → mpirun snappyHexMesh -parallel -overwrite →
+  reconstructParMesh -constant → decomposePar -force
+(Use --mesh-only)
 
-Run from outside the OpenFOAM shell; the script tries to source common bashrcs or
-uses 'of-run' if present.
+Phase B (start existing solvers later):
+  For each prepared case dir, run: mpirun <application> -parallel
+(Use --start-existing)
+
+Works with:
+- Docker via `of-run` (auto-detected)
+- Native OpenFOAM (no container), if OF binaries are on PATH
 """
 
 import argparse
@@ -25,44 +26,55 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-# ---------------------------- OpenFOAM environment runner ----------------------------
+# ---------------------------- Environment detection ----------------------------
 
 
-def guess_of_bashrc_paths() -> List[Path]:
-    """Return likely OpenFOAM bashrc locations to try in order."""
-    candidates = [
-        "/usr/lib/openfoam/openfoam2406/etc/bashrc",
-        "/opt/openfoam2406/etc/bashrc",
-        "/usr/lib/openfoam/openfoam2312/etc/bashrc",
-        "/usr/lib/openfoam/openfoam2306/etc/bashrc",
-    ]
-    return [Path(p) for p in candidates if Path(p).exists()]
+def has_of_run() -> bool:
+    """Return True if of-run is available."""
+    return shutil.which("of-run") is not None
 
 
-def run_of(cmd: str, case_dir: Path, extra_env: Optional[dict] = None) -> None:
+USE_OF_RUN = has_of_run()
+
+
+def build_cmd(base: str) -> List[str]:
+    """Return the command list, prefixed with 'of-run' when available."""
+    if USE_OF_RUN:
+        return ["of-run", *base.split()]
+    # Native: run as-is via shell if we used pipes; here we pass a pure argv list.
+    return base.split()
+
+
+# ---------------------------- Command runners with logging ----------------------------
+
+
+def _run_and_log(argv: List[str], case_dir: Path, log_file: Optional[Path]) -> None:
     """
-    Run a command with the OpenFOAM environment loaded.
-    Prefers 'of-run' if available, otherwise sources a bashrc and runs the command.
+    Run command (argv) in case_dir. If log_file is given, capture both stdout/stderr to it.
     """
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
-
-    bashrcs = guess_of_bashrc_paths()
-    sourced = " || ".join([f"source '{p}'" for p in bashrcs]) if bashrcs else ""
-    of_run = shutil.which("of-run")
-
-    if of_run:
-        full_cmd = f"{of_run} {cmd}"
-    elif sourced:
-        full_cmd = f'bash -lc "({sourced}) >/dev/null 2>&1; {cmd}"'
+    case_dir.mkdir(parents=True, exist_ok=True)
+    if log_file is None:
+        res = subprocess.run(argv, cwd=str(case_dir))
     else:
-        full_cmd = cmd  # last resort; may fail if OF env not present
-
-    print(f"[RUN] (in {case_dir}) {cmd}")
-    res = subprocess.run(full_cmd, shell=True, cwd=str(case_dir), env=env)
+        with open(log_file, "ab", buffering=0) as f:
+            res = subprocess.run(
+                argv, cwd=str(case_dir), stdout=f, stderr=subprocess.STDOUT
+            )
     if res.returncode != 0:
-        raise RuntimeError(f"Command failed (exit {res.returncode}): {cmd}")
+        raise RuntimeError(f"Command failed ({res.returncode}): {' '.join(argv)}")
+
+
+def run_of(cmd: str, case_dir: Path, log_name: Optional[str] = None) -> None:
+    """
+    Run a (serial) OpenFOAM command in case_dir, logging to log_name if provided.
+    """
+    argv = build_cmd(cmd)
+    log_file = (case_dir / log_name) if log_name else None
+    print(
+        f"[RUN] (in {case_dir}) {' '.join(argv)}"
+        + (f"  -> {log_name}" if log_name else "")
+    )
+    _run_and_log(argv, case_dir, log_file)
 
 
 def run_mpi(
@@ -71,22 +83,28 @@ def run_mpi(
     mpirun_cmd: str,
     np: int,
     hostfile: Optional[Path],
-    extra: str = "",
+    extra: str,
+    log_name: Optional[str],
 ) -> None:
     """
-    Launch an MPI-enabled OpenFOAM command in parallel.
-    Example: mpirun -np 8 [--hostfile X] snappyHexMesh -parallel -overwrite
+    Run an MPI command inside the OF environment (via of-run or native).
     """
-    pieces = [mpirun_cmd, f"-np {np}"]
+    parts = [mpirun_cmd, f"-np {np}"]
     if hostfile:
-        pieces.append(f"--hostfile {hostfile}")
+        parts += ["--hostfile", str(hostfile)]
     if extra:
-        pieces.append(extra)
-    pieces.append(cmd)
-    run_of(" ".join(pieces), case_dir)
+        parts += extra.split()
+    parts += cmd.split()
+    argv = build_cmd(" ".join(parts))
+    log_file = (case_dir / log_name) if log_name else None
+    print(
+        f"[RUN] (in {case_dir}) {' '.join(argv)}"
+        + (f"  -> {log_name}" if log_name else "")
+    )
+    _run_and_log(argv, case_dir, log_file)
 
 
-# ---------------------------- STL rotation helpers ----------------------------
+# ---------------------------- STL rotation ----------------------------
 
 
 def rotate_stl_with_surfaceTransformPoints(
@@ -95,194 +113,164 @@ def rotate_stl_with_surfaceTransformPoints(
     yaw_deg: float,
     pivot: Tuple[float, float, float] = (50.0, 0.0, 0.0),
 ) -> None:
-    """Rotate STL around z-axis by yaw_deg degrees about pivot using surfaceTransformPoints."""
+    """Rotate STL around z-axis by yaw_deg degrees about pivot using surfaceTransformPoints, logging to log.rotate."""
     stl_path = case_dir / stl_rel
     tri_dir = stl_path.parent
-    tmp1 = tri_dir / f".tmp_rot1_{yaw_deg}.stl"
-    tmp2 = tri_dir / f".tmp_rot2_{yaw_deg}.stl"
-    tmp3 = tri_dir / f".tmp_rot3_{yaw_deg}.stl"
+    tri_dir.mkdir(parents=True, exist_ok=True)
+
+    src_name = stl_path.name
+    tmp1 = f".tmp_rot1_{yaw_deg}.stl"
+    tmp2 = f".tmp_rot2_{yaw_deg}.stl"
+    tmp3 = f".tmp_rot3_{yaw_deg}.stl"
 
     x0, y0, z0 = pivot
-
-    # translate (-pivot)
-    run_of(
-        f"surfaceTransformPoints -translate '({-x0} {-y0} {-z0})' {stl_path.name} {tmp1.name}",
-        case_dir,
-    )
-    # rotate (rollPitchYaw expects radians)
     import math
 
     yaw_rad = math.radians(yaw_deg)
-    run_of(
-        f"surfaceTransformPoints -rollPitchYaw '(0 0 {yaw_rad})' {tmp1.name} {tmp2.name}",
-        case_dir,
-    )
-    # translate back (+pivot)
-    run_of(
-        f"surfaceTransformPoints -translate '({x0} {y0} {z0})' {tmp2.name} {tmp3.name}",
-        case_dir,
-    )
 
-    tmp3.replace(stl_path)
+    # We run in tri_dir, but still resolve logs in the case root for simplicity.
+    def rof(local_cmd: str):
+        argv = build_cmd(local_cmd)
+        logf = case_dir / "log.rotate"
+        print(f"[RUN] (in {tri_dir}) {' '.join(argv)}  -> log.rotate")
+        _run_and_log(argv, tri_dir, logf)
+
+    rof(f"surfaceTransformPoints -translate '({-x0} {-y0} {-z0})' {src_name} {tmp1}")
+    rof(f"surfaceTransformPoints -rollPitchYaw '(0 0 {yaw_rad})' {tmp1} {tmp2}")
+    rof(f"surfaceTransformPoints -translate '({x0} {y0} {z0})' {tmp2} {tmp3}")
+
+    (tri_dir / tmp3).replace(stl_path)
     for t in (tmp1, tmp2):
         try:
-            t.unlink()
+            (tri_dir / t).unlink()
         except FileNotFoundError:
             pass
 
 
-# ---------------------------- Case + dict helpers ----------------------------
+# ---------------------------- Case helpers ----------------------------
 
 
 def clone_template(template: Path, destination: Path) -> None:
-    """Clone the template case directory into destination."""
     if destination.exists():
         raise FileExistsError(f"Destination already exists: {destination}")
 
     def _ignore(dirpath, names):
-        ignore_list = []
+        ignore = []
         for n in names:
-            if n.startswith("processor"):
-                ignore_list.append(n)
-            if n in {".git", ".venv", "__pycache__"}:
-                ignore_list.append(n)
-        return set(ignore_list)
+            if n.startswith("processor") or n in {".git", ".venv", "__pycache__"}:
+                ignore.append(n)
+        return set(ignore)
 
     shutil.copytree(template, destination, ignore=_ignore)
 
 
 def ensure_surface_feature_dict(case_dir: Path, stl_rel: Path) -> None:
-    """Ensure system/surfaceFeatureExtractDict exists and references the STL; create minimal one if missing."""
     sys_dir = case_dir / "system"
     sys_dir.mkdir(exist_ok=True)
-    dict_path = sys_dir / "surfaceFeatureExtractDict"
-    if dict_path.exists():
+    dpath = sys_dir / "surfaceFeatureExtractDict"
+    if dpath.exists():
         return
-    content = f"""/*--------------------------------*- C++ -*----------------------------------*\\
-| Minimal surfaceFeatureExtractDict generated by prepare_yaw_sweep.py          |
+    dpath.write_text(f"""/*--------------------------------*- C++ -*----------------------------------*\\
+| Minimal surfaceFeatureExtractDict (auto-generated)                           |
 \\*---------------------------------------------------------------------------*/
 FoamFile
 {{
-    version     2.0;
-    format      ascii;
-    class       dictionary;
-    object      surfaceFeatureExtractDict;
+    version 2.0;
+    format ascii;
+    class dictionary;
+    object surfaceFeatureExtractDict;
 }}
-
 surfaces
 (
     {{
-        file    "{stl_rel.as_posix()}";
-        level   0;
+        file "{stl_rel.as_posix()}";
+        level 0;
         extractFromSurfaceFeatureEdges yes;
         writeObj yes;
         includedAngle 150;
     }}
 );
-"""
-    dict_path.write_text(content)
+""")
 
 
 def ensure_decompose_dict(case_dir: Path, np: int) -> None:
-    """
-    Ensure system/decomposeParDict exists and set numberOfSubdomains to np.
-    If it exists, only update numberOfSubdomains; leave method and coefficients intact.
-    """
     sys_dir = case_dir / "system"
     sys_dir.mkdir(exist_ok=True)
     dpath = sys_dir / "decomposeParDict"
-
-    template = f"""/*--------------------------------*- C++ -*----------------------------------*\\
-| decomposeParDict generated/updated by prepare_yaw_sweep.py                   |
+    if not dpath.exists():
+        dpath.write_text(f"""/*--------------------------------*- C++ -*----------------------------------*\\
+| decomposeParDict (auto-generated)                                            |
 \\*---------------------------------------------------------------------------*/
 FoamFile
 {{
-    version     2.0;
-    format      ascii;
-    class       dictionary;
-    object      decomposeParDict;
+    version 2.0;
+    format ascii;
+    class dictionary;
+    object decomposeParDict;
 }}
-
 numberOfSubdomains {np};
-
-method          scotch;
-
-distributed     no;
-
-roots           ();
-
-"""
-    if not dpath.exists():
-        dpath.write_text(template)
+method scotch;
+distributed no;
+roots ();
+""")
         return
-
-    # Update numberOfSubdomains in-place
     txt = dpath.read_text()
     if "numberOfSubdomains" in txt:
-        txt = re.sub(r"numberOfSubdomains\s+\d+\s*;", f"numberOfSubdomains {np};", txt)
+        txt = re.sub(
+            r"numberOfSubdomains\\s+\\d+\\s*;", f"numberOfSubdomains {np};", txt
+        )
     else:
-        # Prepend at top after FoamFile block
-        m = re.search(r"(FoamFile.*?\}\s*)", txt, flags=re.DOTALL)
-        if m:
-            idx = m.end()
-            txt = txt[:idx] + f"\nnumberOfSubdomains {np};\n" + txt[idx:]
-        else:
-            txt = f"numberOfSubdomains {np};\n" + txt
+        txt = f"numberOfSubdomains {np};\n" + txt
     dpath.write_text(txt)
 
 
 def parse_application(case_dir: Path) -> str:
-    """Read system/controlDict and extract the application name."""
     ctrl = (case_dir / "system" / "controlDict").read_text()
     m = re.search(
-        r"^\s*application\s+([A-Za-z0-9_./+-]+)\s*;", ctrl, flags=re.MULTILINE
+        r"^\\s*application\\s+([A-Za-z0-9_./+-]+)\\s*;", ctrl, flags=re.MULTILINE
     )
     if not m:
-        raise RuntimeError("Could not find 'application' in system/controlDict.")
+        raise RuntimeError("Could not find application in controlDict.")
     return m.group(1)
 
 
-# ---------------------------- Main sweep logic ----------------------------
+def make_case_name(prefix: str, angle: float) -> str:
+    return f"{prefix}{int(round(angle)):03d}"
 
 
-def prepare_and_run_angle(
+# ---------------------------- Meshing pipeline per angle ----------------------------
+
+
+def prepare_and_mesh_angle(
     template: Path,
     out_root: Path,
     angle: float,
     pivot: Tuple[float, float, float],
-    run_solver: bool,
     np: int,
     mpirun_cmd: str,
     hostfile: Optional[Path],
     mpirun_extra: str,
+    case_prefix: str,
 ) -> Path:
-    """Prepare a single angle case and run the full parallel pipeline."""
-    case_name = f"yaw_{int(angle) if float(angle).is_integer() else angle}deg"
+    case_name = make_case_name(case_prefix, angle)
     case_dir = out_root / case_name
-    print(f"\n=== Preparing angle {angle}° → {case_dir} ===")
+    print(f"\n=== Prepare/Mesh angle {angle}° → {case_dir} ===")
 
     clone_template(template, case_dir)
-
-    # STL must exist
     stl_rel = Path("constant/triSurface/hull.stl")
     if not (case_dir / stl_rel).exists():
         raise FileNotFoundError(f"Missing STL: {case_dir / stl_rel}")
 
-    # Rotate STL
-    rotate_stl_with_surfaceTransformPoints(case_dir, stl_rel, angle, pivot=pivot)
+    rotate_stl_with_surfaceTransformPoints(case_dir, stl_rel, angle, pivot)
 
-    # Features (serial)
     ensure_surface_feature_dict(case_dir, stl_rel)
-    run_of("surfaceFeatureExtract", case_dir)
+    run_of("surfaceFeatureExtract", case_dir, log_name="log.surfaceFeatureExtract")
 
-    # blockMesh (serial)
-    run_of("blockMesh", case_dir)
+    run_of("blockMesh", case_dir, log_name="log.blockMesh")
 
-    # Prepare decomposeParDict and decompose
     ensure_decompose_dict(case_dir, np)
-    run_of("decomposePar", case_dir)
+    run_of("decomposePar", case_dir, log_name="log.decomposePar")
 
-    # Parallel snappyHexMesh
     run_mpi(
         "snappyHexMesh -parallel -overwrite",
         case_dir,
@@ -290,105 +278,164 @@ def prepare_and_run_angle(
         np,
         hostfile,
         mpirun_extra,
+        log_name="log.snappyHexMesh",
     )
 
-    # Reconstruct mesh into constant/ (keeps fields in processors)
-    run_of("reconstructParMesh -constant", case_dir)
+    run_of("reconstructParMesh -constant", case_dir, log_name="log.reconstructParMesh")
 
-    # Re-decompose for solver (ensures consistent partitions after mesh change)
-    run_of("decomposePar -force", case_dir)
-
-    # Solver (parallel)
-    if run_solver:
-        app = parse_application(case_dir)
-        run_mpi(f"{app} -parallel", case_dir, mpirun_cmd, np, hostfile, mpirun_extra)
+    # Re-decompose for solver so the case is solver-ready in phase B
+    run_of("decomposePar -force", case_dir, log_name="log.decomposePar.solver")
 
     return case_dir
 
 
-def parse_angles(spec: str) -> List[float]:
-    vals: List[float] = []
-    for tok in spec.split(","):
-        tok = tok.strip()
-        if not tok:
+# ---------------------------- Start solvers for existing cases ----------------------------
+
+
+def start_solver_for_existing_cases(
+    out_root: Path,
+    case_prefix: str,
+    np: int,
+    mpirun_cmd: str,
+    hostfile: Optional[Path],
+    mpirun_extra: str,
+) -> None:
+    """
+    Iterate all subdirs in out_root starting with case_prefix and launch solver in parallel.
+    """
+    for sub in sorted(out_root.iterdir()):
+        if not sub.is_dir():
             continue
-        vals.append(float(tok))
-    return vals
+        if not sub.name.startswith(case_prefix):
+            continue
+        # Make sure it looks like a prepared case
+        if not (sub / "system" / "controlDict").exists():
+            continue
+        app = parse_application(sub)
+        print(f"\n=== Start solver in {sub} (app={app}) ===")
+        run_mpi(
+            f"{app} -parallel",
+            sub,
+            mpirun_cmd,
+            np,
+            hostfile,
+            mpirun_extra,
+            log_name="log.simpleFoam",
+        )
+
+
+# ---------------------------- CLI ----------------------------
+
+
+def parse_angles(spec: str) -> List[float]:
+    return [float(tok.strip()) for tok in spec.split(",") if tok.strip()]
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Prepare and run a yaw sweep (parallel snappy + solver)."
+        description="Yaw sweep with logging (Docker via of-run or native)."
+    )
+    parser.add_argument("--template", type=Path, help="Template case path (phase A).")
+    parser.add_argument(
+        "--out-root", required=True, type=Path, help="Output root for cases."
     )
     parser.add_argument(
-        "--template", required=True, type=Path, help="Path to the template case."
+        "--case-prefix", default="yaw_", help="Case folder prefix, e.g., 'barge_'."
+    )
+    parser.add_argument("--x0", type=float, default=50.0)
+    parser.add_argument("--y0", type=float, default=0.0)
+    parser.add_argument("--z0", type=float, default=0.0)
+    parser.add_argument(
+        "--angles", type=str, default="90,45,135,180,15,30,60,75,105,120,150"
+    )
+    parser.add_argument("--np", type=int, default=8)
+    parser.add_argument("--mpirun", type=str, default="mpirun")
+    parser.add_argument("--mpirun-extra", type=str, default="")
+    parser.add_argument("--hostfile", type=Path, default=None)
+    # Phase control:
+    parser.add_argument(
+        "--mesh-only",
+        action="store_true",
+        help="Phase A: prepare/mesh cases, do not start solver.",
     )
     parser.add_argument(
-        "--out-root", required=True, type=Path, help="Output root for generated cases."
+        "--start-existing",
+        action="store_true",
+        help="Phase B: start solvers for existing cases under --out-root.",
     )
+    # Legacy flag (mutually exclusive with mesh-only/start-existing)
     parser.add_argument(
-        "--x0", type=float, default=50.0, help="Pivot x (default: 50.0)."
+        "--start-solver",
+        action="store_true",
+        help="(Phase A) Start solver immediately after meshing.",
     )
-    parser.add_argument("--y0", type=float, default=0.0, help="Pivot y (default: 0.0).")
-    parser.add_argument("--z0", type=float, default=0.0, help="Pivot z (default: 0.0).")
-    parser.add_argument(
-        "--angles",
-        type=str,
-        default="90,45,135,180,15,30,60,75,105,120,150",
-        help="Comma-separated list of angles to process, in order.",
-    )
-    parser.add_argument(
-        "--start-solver", action="store_true", help="Run the solver after meshing."
-    )
-    parser.add_argument(
-        "--no-start-solver", action="store_true", help="Do not run the solver."
-    )
-    parser.add_argument(
-        "--np",
-        type=int,
-        default=8,
-        help="MPI ranks for decompose/snappy/solver (default: 8).",
-    )
-    parser.add_argument(
-        "--mpirun",
-        type=str,
-        default="mpirun",
-        help="MPI launcher command (default: 'mpirun').",
-    )
-    parser.add_argument(
-        "--hostfile", type=Path, default=None, help="Optional path to an MPI hostfile."
-    )
-    parser.add_argument(
-        "--mpirun-extra",
-        type=str,
-        default="",
-        help="Extra args appended after -np (e.g., '--bind-to none --map-by slot').",
-    )
+    parser.add_argument("--no-start-solver", action="store_true")
 
     args = parser.parse_args()
-    template = args.template.resolve()
+
     out_root = args.out_root.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
-
-    run_solver = args.start_solver and not args.no_start_solver
     pivot = (args.x0, args.y0, args.z0)
-    angles = parse_angles(args.angles)
 
-    for ang in angles:
-        prepare_and_run_angle(
-            template=template,
+    mode = "Docker (of-run)" if USE_OF_RUN else "native OpenFOAM"
+    print(f"[INFO] Mode: {mode}")
+
+    # Phase B only
+    if args.start_existing:
+        start_solver_for_existing_cases(
             out_root=out_root,
-            angle=ang,
-            pivot=pivot,
-            run_solver=run_solver,
+            case_prefix=args.case_prefix,
             np=args.np,
             mpirun_cmd=args.mpirun,
             hostfile=args.hostfile.resolve() if args.hostfile else None,
             mpirun_extra=args.mpirun_extra.strip(),
         )
+        print("\nAll existing cases started.")
+        return
+
+    # Phase A (prepare/mesh) – requires template and angles
+    if args.template is None:
+        raise SystemExit(
+            "--template is required for meshing phase (omit it when using --start-existing)."
+        )
+    template = args.template.resolve()
+    angles = parse_angles(args.angles)
+
+    # Decide solver start for Phase A
+    start_solver = False
+    if args.mesh_only:
+        start_solver = False
+    else:
+        start_solver = args.start_solver and not args.no_start_solver
+
+    for ang in angles:
+        case_dir = prepare_and_mesh_angle(
+            template=template,
+            out_root=out_root,
+            angle=ang,
+            pivot=pivot,
+            np=args.np,
+            mpirun_cmd=args.mpirun,
+            hostfile=args.hostfile.resolve() if args.hostfile else None,
+            mpirun_extra=args.mpirun_extra.strip(),
+            case_prefix=args.case_prefix,
+        )
+        if start_solver:
+            app = parse_application(case_dir)
+            print(f"\n=== Start solver immediately in {case_dir} (app={app}) ===")
+            run_mpi(
+                f"{app} -parallel",
+                case_dir,
+                args.mpirun,
+                args.np,
+                args.hostfile,
+                args.mpirun_extra.strip(),
+                log_name="log.simpleFoam",
+            )
 
     print(
-        "\nAll requested angles prepared." + (" Solvers started." if run_solver else "")
+        "\nDone. Cases prepared."
+        + (" Solvers started." if start_solver else " (mesh-only)")
     )
 
 

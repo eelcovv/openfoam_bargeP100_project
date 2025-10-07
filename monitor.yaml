@@ -29,10 +29,24 @@ figures:
   - { source: forces, field: total_x, label: "Fx total" }
   - { source: forces, field: total_y, label: "Fy total" }
   - { source: forces, field: total_z, label: "Fz total" }
+- title: "Forces - split (pressure vs viscous)"
+  yscale: linear
+  series:
+  - { source: forces, field: pressure_x, label: "Fx pressure" }
+  - { source: forces, field: viscous_x, label: "Fx viscous" }
 
 - title: "Moments - total (pressure + viscous)"
   yscale: linear
   series:
-  - { source: forces, field: moment_total_x, label: "Mx total" }
-  - { source: forces, field: moment_total_y, label: "My total" }
-  - { source: forces, field: moment_total_z, label: "Mz total" }
+  - { source: forces, field: total_x, label: "Mx total" }
+  - { source: forces, field: total_y, label: "My total" }
+  - { source: forces, field: total_z, label: "Mz total" }
+- title: "Moments - split (pressure vs viscous)"
+  yscale: linear
+  series:
+  - { source: forces, field: pressure_x, label: "Mx pressure" }
+  - { source: forces, field: viscous_x, label: "Mx viscous" }
+  - { source: forces, field: pressure_y, label: "My pressure" }
+  - { source: forces, field: viscous_y, label: "My viscous" }
+  - { source: forces, field: pressure_z, label: "Mz pressure" }
+  - { source: forces, field: viscous_z, label: "Mz viscous" }

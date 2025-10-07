@@ -128,94 +128,232 @@ def _extract_floats(line: str) -> List[float]:
 
 def load_forces(case_dir: Path) -> Optional[pd.DataFrame]:
     """
-    Parse OpenFOAM forces function output into a tidy DataFrame with columns:
-        time,
-        fpx,fpy,fpz, fvx,fvy,fvz,
-        mpx,mpy,mpz, mvx,mvy,mvz,
-        ftx,fty,ftz, mtx,mty,mtz
-    Returns None if not found.
+    Load forces (force[s].dat) and, if present, moments (moment[s].dat).
+    Returns a merged DataFrame on 'time' with columns:
+      # forces (tabular or classic parsed):
+      time, total_x,total_y,total_z,
+            pressure_x,pressure_y,pressure_z,
+            viscous_x, viscous_y, viscous_z,
+      # moments (tabular):
+      moment_total_x, moment_total_y, moment_total_z,
+      moment_pressure_x, moment_pressure_y, moment_pressure_z,
+      moment_viscous_x,  moment_viscous_y,  moment_viscous_z
     """
-    fpath = find_single_file(case_dir, ["postProcessing", "forces", "*", "forces.dat"])
-    if fpath is None or not fpath.is_file():
+
+    def _read_tabular(fpath: Path) -> Optional[pd.DataFrame]:
+        header_cols: List[str] = []
+        data_rows: List[List[float]] = []
+        with fpath.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith("# Time"):
+                    header_cols = [c for c in s.lstrip("#").strip().split() if c]
+                    continue
+                if s.startswith("#"):
+                    continue
+                if header_cols:
+                    parts = s.split()
+                    vals: List[float] = []
+                    for p in parts[: len(header_cols)]:
+                        try:
+                            vals.append(float(p))
+                        except Exception:
+                            vals.append(float("nan"))
+                    if vals:
+                        data_rows.append(vals)
+        if header_cols and data_rows:
+            df = pd.DataFrame(data_rows, columns=header_cols)
+            if "Time" in df.columns:
+                df.rename(columns={"Time": "time"}, inplace=True)
+            return df
         return None
 
-    rows: List[List[float]] = []
-    with fpath.open("r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            vals = _extract_floats(s)
-            # Expected sequence (classic forces function):
-            # t,
-            # (fpx fpy fpz) (fvx fvy fvz) (mpx mpy mpz) (mvx mvy mvz)
-            if len(vals) < 13:
-                # Some variants include additional columns; we accept minimal.
-                # If malformed, skip line.
-                continue
-            t = vals[0]
-            fpx, fpy, fpz = vals[1:4]
-            fvx, fvy, fvz = vals[4:7]
-            mpx, mpy, mpz = vals[7:10]
-            mvx, mvy, mvz = vals[10:13]
-            ftx, fty, ftz = fpx + fvx, fpy + fvy, fpz + fvz
-            mtx, mty, mtz = mpx + mvx, mpy + mvy, mpz + mvz
-            rows.append(
-                [
-                    t,
-                    fpx,
-                    fpy,
-                    fpz,
-                    fvx,
-                    fvy,
-                    fvz,
-                    mpx,
-                    mpy,
-                    mpz,
-                    mvx,
-                    mvy,
-                    mvz,
-                    ftx,
-                    fty,
-                    ftz,
-                    mtx,
-                    mty,
-                    mtz,
-                ]
-            )
+    def _read_classic_forces(fpath: Path) -> Optional[pd.DataFrame]:
+        rows: List[List[float]] = []
+        with fpath.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                vals = _extract_floats(s)
+                if len(vals) < 13:
+                    continue
+                t = vals[0]
+                fpx, fpy, fpz = vals[1:4]
+                fvx, fvy, fvz = vals[4:7]
+                mpx, mpy, mpz = vals[7:10]
+                mvx, mvy, mvz = vals[10:13]
+                ftx, fty, ftz = fpx + fvx, fpy + fvy, fpz + fvz
+                mtx, mty, mtz = mpx + mvx, mpy + mvy, mpz + mvz
+                rows.append(
+                    [
+                        t,
+                        fpx,
+                        fpy,
+                        fpz,
+                        fvx,
+                        fvy,
+                        fvz,
+                        mpx,
+                        mpy,
+                        mpz,
+                        mvx,
+                        mvy,
+                        mvz,
+                        ftx,
+                        fty,
+                        ftz,
+                        mtx,
+                        mty,
+                        mtz,
+                    ]
+                )
+        if not rows:
+            return None
+        cols = [
+            "time",
+            "fpx",
+            "fpy",
+            "fpz",
+            "fvx",
+            "fvy",
+            "fvz",
+            "mpx",
+            "mpy",
+            "mpz",
+            "mvx",
+            "mvy",
+            "mvz",
+            "total_x",
+            "total_y",
+            "total_z",
+            "moment_total_x",
+            "moment_total_y",
+            "moment_total_z",
+        ]
+        df = pd.DataFrame(rows, columns=cols)
+        # provide pressure/viscous split aliases
+        df["pressure_x"], df["pressure_y"], df["pressure_z"] = (
+            df["fpx"],
+            df["fpy"],
+            df["fpz"],
+        )
+        df["viscous_x"], df["viscous_y"], df["viscous_z"] = (
+            df["fvx"],
+            df["fvy"],
+            df["fvz"],
+        )
+        # also expose moment pressure/viscous if useful
+        df["moment_pressure_x"], df["moment_pressure_y"], df["moment_pressure_z"] = (
+            df["mpx"],
+            df["mpy"],
+            df["mpz"],
+        )
+        df["moment_viscous_x"], df["moment_viscous_y"], df["moment_viscous_z"] = (
+            df["mvx"],
+            df["mvy"],
+            df["mvz"],
+        )
+        return df
 
-    cols = [
-        "time",
-        "fpx",
-        "fpy",
-        "fpz",
-        "fvx",
-        "fvy",
-        "fvz",
-        "mpx",
-        "mpy",
-        "mpz",
-        "mvx",
-        "mvy",
-        "mvz",
-        "ftx",
-        "fty",
-        "ftz",
-        "mtx",
-        "mty",
-        "mtz",
-    ]
-    df = pd.DataFrame(rows, columns=cols)
+    def _find_first(patterns: List[List[str]]) -> Optional[Path]:
+        for parts in patterns:
+            p = find_single_file(case_dir, parts)
+            if p and p.is_file():
+                return p
+        return None
 
-    # Convenience aliases for YAML 'field' names:
-    # total_x/y/z and moment_total_x/y/z
-    df["total_x"], df["total_y"], df["total_z"] = df["ftx"], df["fty"], df["ftz"]
-    df["moment_total_x"], df["moment_total_y"], df["moment_total_z"] = (
-        df["mtx"],
-        df["mty"],
-        df["mtz"],
+    # --------- FORCES ----------
+    forces_path = _find_first(
+        [
+            ["postProcessing", "forces", "*", "force.dat"],
+            ["postProcessing", "forces", "*", "forces.dat"],
+        ]
     )
-    return df
+    forces_df: Optional[pd.DataFrame] = None
+    if forces_path:
+        # try tabular first
+        forces_df = _read_tabular(forces_path)
+        if forces_df is not None:
+            # normalize/aliases expected by YAML
+            # ensure required columns exist
+            for a, b in [
+                ("total_x", "total_x"),
+                ("total_y", "total_y"),
+                ("total_z", "total_z"),
+                ("pressure_x", "pressure_x"),
+                ("pressure_y", "pressure_y"),
+                ("pressure_z", "pressure_z"),
+                ("viscous_x", "viscous_x"),
+                ("viscous_y", "viscous_y"),
+                ("viscous_z", "viscous_z"),
+            ]:
+                if b in forces_df.columns and a not in forces_df.columns:
+                    forces_df[a] = forces_df[b]
+        else:
+            # classic fallback
+            forces_df = _read_classic_forces(forces_path)
+
+    # --------- MOMENTS ----------
+    moments_path = _find_first(
+        [
+            ["postProcessing", "moment", "*", "moment.dat"],
+            ["postProcessing", "moment", "*", "moments.dat"],
+        ]
+    )
+    moments_df: Optional[pd.DataFrame] = None
+    if moments_path:
+        moments_df = _read_tabular(moments_path)
+        if moments_df is not None:
+            # Expect columns: time, total_x,total_y,total_z, pressure_x.., viscous_x..
+            # add explicit 'moment_*' aliases
+            rename_map = {}
+            if "Time" in moments_df.columns:  # safety; _read_tabular already fixes this
+                rename_map["Time"] = "time"
+            moments_df.rename(columns=rename_map, inplace=True)
+            for a, b in [
+                ("moment_total_x", "total_x"),
+                ("moment_total_y", "total_y"),
+                ("moment_total_z", "total_z"),
+                ("moment_pressure_x", "pressure_x"),
+                ("moment_pressure_y", "pressure_y"),
+                ("moment_pressure_z", "pressure_z"),
+                ("moment_viscous_x", "viscous_x"),
+                ("moment_viscous_y", "viscous_y"),
+                ("moment_viscous_z", "viscous_z"),
+            ]:
+                if b in moments_df.columns and a not in moments_df.columns:
+                    moments_df[a] = moments_df[b]
+
+            # reduce to the columns we care about
+            keep_cols = [
+                "time",
+                "moment_total_x",
+                "moment_total_y",
+                "moment_total_z",
+                "moment_pressure_x",
+                "moment_pressure_y",
+                "moment_pressure_z",
+                "moment_viscous_x",
+                "moment_viscous_y",
+                "moment_viscous_z",
+            ]
+            existing = [c for c in keep_cols if c in moments_df.columns]
+            moments_df = moments_df[existing]
+
+    # --------- MERGE ----------
+    if forces_df is None and moments_df is None:
+        return None
+    if forces_df is None:
+        return moments_df
+    if moments_df is None:
+        return forces_df
+
+    merged = pd.merge(forces_df, moments_df, on="time", how="outer").sort_values("time")
+    merged.reset_index(drop=True, inplace=True)
+    return merged
 
 
 # --------------------------- Plotting engine -------------------------------

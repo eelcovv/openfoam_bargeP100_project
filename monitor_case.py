@@ -30,15 +30,18 @@ Notes:
 
 from __future__ import annotations
 
+import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import argparse
 import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import yaml  # type: ignore
-import pandas as pd  # type: ignore
-import matplotlib.pyplot as plt  # type: ignore
+import yaml
+import pandas as pd
+import matplotlib.pyplot as plt
 
 
 # --------------------------- Filesystem helpers -----------------------------
@@ -476,6 +479,110 @@ def plot_figures(case_dir: Path, cfg: Dict, out_dir: Path, show: bool) -> int:
     return plotted
 
 
+# --------------------------- Live watch & serve -----------------------------
+
+
+def collect_targets(case_dir: Path) -> list[Path]:
+    """Return the files we should watch for changes (solverInfo/forces/moment)."""
+    pats = [
+        ["postProcessing", "solverInfo", "*", "solverInfo.dat"],
+        ["postProcessing", "forces", "*", "force.dat"],
+        ["postProcessing", "forces", "*", "forces.dat"],
+        ["postProcessing", "moment", "*", "moment.dat"],
+        ["postProcessing", "moment", "*", "moments.dat"],
+    ]
+    files: list[Path] = []
+    for parts in pats:
+        p = find_single_file(case_dir, parts)
+        if p:
+            files.append(p)
+    return files
+
+
+def mtime_signature(paths: list[Path]) -> float:
+    """Combine mtimes tot één signatuur; als er iets verandert, verandert deze."""
+    sig = 0.0
+    for p in paths:
+        try:
+            sig += p.stat().st_mtime
+        except FileNotFoundError:
+            sig += 0.0
+    return sig
+
+
+def write_autoindex(out_dir: Path):
+    """Maak een simpele index.html met auto-refresh en thumbnails."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    imgs = sorted([p.name for p in out_dir.glob("*.png")])
+    lines = [
+        "<!doctype html><meta charset='utf-8'>",
+        "<title>OpenFOAM monitor</title>",
+        "<meta http-equiv='refresh' content='2'>",
+        "<style>body{font-family:sans-serif;margin:20px} img{max-width:95vw; height:auto; display:block; margin:16px 0;}</style>",
+        "<h1>OpenFOAM monitor</h1>",
+        "<p>Auto-refresh every 2 seconds.</p>",
+    ]
+    for im in imgs:
+        lines.append(f"<h3>{im}</h3>")
+        lines.append(f"<img src='{im}?t={int(time.time())}'>")
+    (out_dir / "index.html").write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_http_server(root: Path, port: int):
+    """Start een eenvoudige HTTP-server op aparte thread."""
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(root), **kwargs)
+
+        def log_message(self, fmt, *args):
+            pass  # stil houden
+
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    print(f"Serving {root} at http://localhost:{port}")
+    return httpd
+
+
+def live_watch(
+    case_dir: Path,
+    cfg: dict,
+    out_dir: Path,
+    show: bool,
+    interval: float,
+    serve_port: int | None,
+):
+    targets = collect_targets(case_dir)
+    if not targets:
+        print("No postProcessing files found to watch.", file=sys.stderr)
+    prev_sig = -1.0
+    httpd = None
+    if serve_port is not None:
+        write_autoindex(out_dir)
+        httpd = run_http_server(out_dir, serve_port)
+
+    print(f"Watching {case_dir} every {interval}s. Press Ctrl+C to stop.")
+    try:
+        while True:
+            sig = mtime_signature(targets)
+            if sig != prev_sig:
+                prev_sig = sig
+                n = plot_figures(case_dir, cfg, out_dir, show=show)
+                if serve_port is not None:
+                    write_autoindex(out_dir)
+                if n == 0:
+                    print("[watch] No figures produced (yet).")
+                else:
+                    print(f"[watch] Updated {n} figure(s).")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        if httpd is not None:
+            httpd.shutdown()
+
+
 # --------------------------- CLI -------------------------------------------
 
 
@@ -505,6 +612,18 @@ def main() -> int:
     ap.add_argument(
         "--show", action="store_true", help="Show figures interactively after saving"
     )
+    ap.add_argument(
+        "--watch",
+        type=float,
+        metavar="SECS",
+        help="Poll interval in seconds for live updates",
+    )
+    ap.add_argument(
+        "--serve",
+        type=int,
+        metavar="PORT",
+        help="Serve out-dir via simple HTTP server on PORT (auto-refresh index.html)",
+    )
     args = ap.parse_args()
 
     case_dir: Path = args.case_folder.resolve()
@@ -523,11 +642,19 @@ def main() -> int:
     out_dir = args.out_dir or (case_dir / "postProcessing" / "monitor")
     out_dir = out_dir.resolve()
 
-    n = plot_figures(case_dir, cfg, out_dir, show=args.show)
-    if n == 0:
-        print("No figures produced.", file=sys.stderr)
-        return 1
-    return 0
+    if args.watch or args.serve:
+        live_watch(
+            case_dir,
+            cfg,
+            out_dir,
+            show=bool(args.show),
+            interval=(args.watch or 2.0),
+            serve_port=args.serve,
+        )
+        return 0
+    else:
+        n = plot_figures(case_dir, cfg, out_dir, show=args.show)
+        return 0 if n > 0 else 1
 
 
 if __name__ == "__main__":

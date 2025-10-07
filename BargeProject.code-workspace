@@ -2,6 +2,10 @@ states
 {
   "folders": [
     {
+      "name": "BargeProject",
+      "path": "."
+    },
+    {
       "path": "templates/template_draft1270_12mps"
     },
     {
@@ -27,6 +31,8 @@ states
     },
     "python.testing.pytestEnabled": true,
     "python.testing.unittestEnabled": false,
+    "git.autoRepositoryDetection": "subFolders",
+    "git.repositoryScanMaxDepth": 3,
     "workbench.colorTheme": "Quiet Light"
   }
 }

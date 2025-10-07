@@ -1,0 +1,57 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| Turbulent kinetic energy k                                               |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0.1;
+
+boundaryField
+{
+    wall_barge
+    {
+        type kqRWallFunction;
+        value uniform 0.0;
+    }
+
+    Watersurface
+    {
+        type kqRWallFunction;
+        value uniform 0.0;
+    }
+
+    Inflow
+    {
+        type atmBoundaryLayerInletK;
+        Uref 12;
+        Zref 10;
+        z0   0.01;
+        d               uniform 0;   // zero-plane displacement [m]
+        value uniform 0.1;
+        flowDir         (1 0 0);    
+        zDir         (0 0 1);     
+    }
+
+    Outflow
+    {
+        type inletOutlet;
+        inletValue uniform 0.1;
+        value      uniform 0.1;
+    }
+
+    Sides
+    {
+        type zeroGradient;
+    }
+
+    Ambient
+    {
+        type zeroGradient;
+    }
+}
+

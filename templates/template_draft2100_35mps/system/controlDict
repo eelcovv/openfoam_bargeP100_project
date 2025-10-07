@@ -1,0 +1,144 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | foam-extend: Open Source CFD                    |
+|  \\    /   O peration     | Version:     3.1                                |
+|   \\  /    A nd           | Web:         http://www.extend-project.de       |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+application     simpleFoam;
+
+startFrom       latestTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         1000;
+
+deltaT          1;
+
+writeControl    timeStep;
+
+writeInterval   10;
+
+purgeWrite 	1;
+
+writeFormat     ascii;
+
+writePrecision  7;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable yes;
+
+
+// ************************************************************************* //
+
+functions
+{
+    residuals
+    {
+        type            residuals;
+        libs            ("libutilityFunctionObjects.so");
+        fields          (p U k omega);
+        writeControl    timeStep;
+        writeInterval   1;
+    }
+    solverInfo
+    {
+        type            solverInfo;
+        libs            ("libutilityFunctionObjects.so");
+
+        // Use exactly what your solver solves:
+        fields          (p U k omega);   // e.g. for simpleFoam + SST
+
+        // Usual write settings
+        writeControl    timeStep;
+        writeInterval   1;
+        log             yes;
+    }
+
+    forces
+    {
+        type            forces;
+        libs            ("libforces.so");
+        patches         (wall_barge);
+        rho             rhoInf;        // incompressible: vaste rho
+        rhoInf          1.225;         // lucht (kg/m^3); water zou ~1025 zijn
+        CofR            (0 0 0);       // kies logisch referentiepunt
+        writeControl    timeStep;
+        writeInterval   1;
+        log             yes;
+    }
+
+    forceCoeffs
+    {
+        type            forceCoeffs;
+        libs            ("libforces.so");
+        patches         (wall_barge);
+        rho             rhoInf;
+        rhoInf          1.225;
+        magUInf         35.3;            // Uref of inlet
+        dragDir         (1 0 0);       // drag direction 
+        liftDir         (0 1 0);       // 'lift' direction 
+        CofR            (0 0 0);
+        lRef            10;             // reference lenght [m]  
+        Aref            1000;             // reference-surface [m^2] 
+        writeControl    timeStep;
+        writeInterval   10;
+        log             yes;
+    }
+
+    UMinMax
+    {
+        type            fieldMinMax;
+        libs            ("libfieldFunctionObjects.so");
+        fields          (U);
+        mode            magnitude;
+        writeControl    timeStep;
+        writeInterval   10;
+        log             yes;
+    }
+
+    pMinMax
+    {
+        type            fieldMinMax;
+        libs            ("libfieldFunctionObjects.so");
+        fields          (p, nut);
+        writeControl    timeStep;
+        writeInterval   10;
+        log             yes;
+    }
+    yPlus
+    {
+        type            yPlus;                       // or: yPlusRAS on older builds
+        libs            ("libfieldFunctionObjects.so");
+        patches         (wall_barge);
+        writeControl    timeStep;
+        writeInterval   10;
+        log             yes;
+    }
+
+    // (Optional) wall shear stress on the barge (τ_w)
+    wallShear
+    {
+        type            wallShearStress;
+        libs            ("libfieldFunctionObjects.so");
+        patches         (wall_barge);
+        writeControl    timeStep;
+        writeInterval   10;
+        log             yes;
+    }
+}
+

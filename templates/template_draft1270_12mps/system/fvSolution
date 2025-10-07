@@ -1,0 +1,95 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| OpenFOAM: The Open Source CFD Toolbox                                      |
+| Version:  2406                                                             |
+| Web:      www.openfoam.com                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    // Pressure: GAMG with absolute tolerance; relTol=0 lets SIMPLE drive convergence
+    p
+    {
+        solver                 GAMG;
+        tolerance              1e-7;            // slightly tighter for crisp pressure
+        relTol                 0.02;
+        smoother               DICGaussSeidel;  // a bit crisper than plain GaussSeidel
+        nPreSweeps             0;
+        nPostSweeps            2;
+        cacheAgglomeration     on;
+        agglomerator           faceAreaPair;
+        nCellsInCoarsestLevel  10;
+        mergeLevels            1;
+    }
+
+    // Momentum and turbulence scalars: modest relative tol to avoid oversolving
+    U
+    {
+        solver     smoothSolver;
+        smoother   symGaussSeidel;
+        tolerance  1e-8;
+        relTol     0.1;          // 5% inner solve is often a sweet spot
+        nSweeps    1;             // 1→2 on good meshes helps convergence smoothness
+    }
+
+    k
+    {
+        solver     smoothSolver;
+        smoother   symGaussSeidel;
+        tolerance  1e-8;
+        relTol     0.05;
+        nSweeps    2;
+    }
+
+    omega
+    {
+        solver     smoothSolver;
+        smoother   symGaussSeidel;
+        tolerance  1e-8;
+        relTol     0.05;
+        nSweeps    2;
+    }
+}
+
+SIMPLE
+{
+    // Clean mesh: no non-orthogonal correction needed
+    nNonOrthogonalCorrectors 0;
+
+    // Slight under-relax on p, moderate on U/k/omega (fast but still robust)
+    // Convergence stops on initial residuals below thresholds
+    residualControl
+    {
+        p           1e-5;     // a touch tighter than 1e-4
+        U           1e-6;
+        "(k|omega)" 1e-6;
+    }
+
+    // (optional toggles, kept default)
+    // momentumPredictor yes;
+    // transonic         no;
+}
+
+relaxationFactors
+{
+    fields
+    {
+        p       0.35;   // a bit higher than 0.3 on good meshes
+    }
+    equations
+    {
+        U       0.75;   // slightly firmer than 0.7
+        k       0.65;
+        omega   0.65;
+    }
+}
+
+// ************************************************************************* //
+

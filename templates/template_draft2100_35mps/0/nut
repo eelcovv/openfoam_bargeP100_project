@@ -1,0 +1,54 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| Turbulent viscosity nut                                                  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}
+dimensions      [0 2 -1 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{
+    wall_barge
+    {
+        type nutkWallFunction;
+        value uniform 0;
+    }
+
+    Watersurface
+    {
+        type nutkRoughWallFunction;
+        Ks    uniform 0.01;   
+        Cs    uniform 0.5;
+        value uniform 0;
+    }
+
+    Inflow
+    {
+        type calculated;
+        value uniform 0;
+    }
+
+    Outflow
+    {
+        type calculated;
+        value uniform 0;
+    }
+
+    Sides
+    {
+        type calculated;
+        value uniform 0;
+    }
+
+    Ambient
+    {
+        type calculated;
+        value uniform 0;
+    }
+}
+

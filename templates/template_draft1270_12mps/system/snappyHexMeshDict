@@ -1,0 +1,231 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| snappyHexMesh (v2406) — distance refinement only (no tight boxes)          |
+| Hull rotates inside a pre-refined core (from blockMesh).                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+
+// Steps
+castellatedMesh true;
+snap            true;
+addLayers       true;   // enable later when base mesh is clean
+
+// --------------------------- Geometry --------------------------------------
+geometry
+{
+    barge_box
+    {
+        type searchableBox;
+        min (-20 -70 0);
+        max ( 120 70 15);
+    }
+    inlet_box
+    {
+        type searchableBox;
+        min (-200 -100 0);
+        max (-199 100 5);
+    }
+    wake_box
+    {
+        type searchableBox;
+        min (-200 -70 0);
+        max (500  70 30);
+    }
+    waterPlane
+    {
+        type searchablePlane;
+        point (0 0 0);
+        normal (0 0 1);  // z=0 plane
+    }
+    // Hull surface (rotated externally if you sweep headings)
+    hull.stl
+    {
+        type triSurfaceMesh;
+        name wall_barge;
+    }
+}
+
+// --------------------- Castellated mesh controls ---------------------------
+castellatedMeshControls
+{
+    // Reasonable global limits
+    maxLocalCells       300000;
+    maxGlobalCells      35000000;
+    minRefinementCells  100;
+    maxLoadUnbalance    0.10;
+
+    // Softer transitions between refinement levels
+    nCellsBetweenLevels 2;
+
+    // Use explicit feature edges for snapping fidelity
+    features
+    (
+        {
+            file "hull.eMesh";
+            level 2;
+        }
+    );
+
+    // Surface refinement on the hull (kept moderate; base mesh is already fine)
+    refinementSurfaces
+    {
+        wall_barge
+        {
+            level  (2 3);
+            patchInfo
+            {
+                type wall;
+            }
+        }
+    }
+
+    // Angles for feature/planarity
+    resolveFeatureAngle 65;
+    planarAngle         60;
+
+    // Distance-based refinement halo around the hull
+    // Near-surface very fine to capture curvature/details; decay smoothly outward
+    refinementRegions
+    {
+        wall_barge
+        {
+            mode   distance;
+            levels (
+                (0.2 4)
+                (1.0 3)
+                (3.0 2)
+            );
+        }
+        waterPlane
+        {
+            mode  distance;
+            levels (
+                (0.1 3)  // within 10cm of z=0 plane
+                (0.4 2)  // within 40cm of z=0 plane
+                (1.0 1)  // within 1m of z=0 plane
+            );
+        }
+        barge_box
+        {
+            mode   inside;
+            levels ((1e15 1));
+        }
+        inlet_box
+        {
+            mode   inside;
+            levels ((1e15 1));
+        }
+        wake_box
+        {
+            mode   inside;
+            levels ((1e15 1));
+        }
+    }
+
+    // Make sure this point is inside the fluid and not inside the hull
+    locationInMesh (200.2 25.6 5.1);
+
+    // Allow cutting zones without closed faces (safer for single-fluid)
+    allowFreeStandingZoneFaces true;
+}
+
+// ------------------------------- Snapping ----------------------------------
+snapControls
+{
+    nSmoothPatch 8;
+    tolerance    3.0;
+    nSolveIter   40;
+    nRelaxIter   6;
+
+    nFeatureSnapIter       3;
+    explicitFeatureSnap    true;
+    implicitFeatureSnap    false;
+    multiRegionFeatureSnap false;
+}
+
+// ------------------------------- Layers ------------------------------------
+addLayersControls
+{
+    relativeSizes          true;
+    expansionRatio         1.15;
+    finalLayerThickness    0.25;
+    minThickness           0.03;
+    nBufferCellsNoExtrude 2;
+    nLayerIter              30;
+    nRelaxIter              12;
+    nGrow                   1;
+
+
+    minMedialAxisAngle 90;
+    maxThicknessToMedialRatio 0.3;
+    nSmoothNormals 3;
+
+    featureAngle            65;
+    maxFaceThicknessRatio   0.5;
+    nSmoothSurfaceNormals   3;
+    nSmoothThickness        10;
+
+    slipFeatureAngle        30;
+
+    layers
+    {
+        wall_barge
+        {
+            nSurfaceLayers 5;
+        }
+        Watersurface
+        {
+            nSurfaceLayers 5;
+        }
+        Sides
+        {
+            nSurfaceLayers 0;
+        }
+        Ambient
+        {
+            nSurfaceLayers 0;
+        }
+        Inflow
+        {
+            nSurfaceLayers 0;
+        }
+        Outflow
+        {
+            nSurfaceLayers 0;
+        }
+    }
+}
+
+// --------------------------- Mesh quality ----------------------------------
+meshQualityControls
+{
+    #include "meshQualityDict"
+
+    maxInternalSkewness 4;
+    maxBoundarySkewness 4;
+    
+    relaxed
+    {
+        maxNonOrtho         85;
+        maxBoundarySkewness 8;
+        maxInternalSkewness 8;
+        minVol              1e-15;
+        minTetQuality       1e-30;
+    }
+
+
+    nSmoothScale   4;
+    errorReduction 0.75;
+}
+
+// Debug/Write toggles
+// debugFlags (mesh featureSeeds);
+// writeFlags (scalarLevels);
+
+mergeTolerance 1e-6;
+

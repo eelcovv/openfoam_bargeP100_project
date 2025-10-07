@@ -1,0 +1,60 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM Extend: The Open Source CFD Toolbox    |
+|  \\    /   O peration     | Version:  v2406                                 |
+|   \\  /    A nd           | Web:      www.extend-project.de                 |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      binary;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions [ 0 1 -1 0 0 0 0 ];
+
+internalField uniform (35.3 0 0);
+
+boundaryField
+{
+    wall_barge
+    {
+      type fixedValue;
+      value uniform (0 0 0);
+    }
+    Sides
+    {
+      type zeroGradient;
+    }
+    Inflow
+    {
+      type atmBoundaryLayerInletVelocity;
+      Uref 35.3;
+      Zref 10;
+      z0   0.1;
+      d               uniform 0;   // zero-plane displacement [m]
+
+      value uniform (35.3 0 0);
+      flowDir         (1 0 0);    
+      zDir         (0 0 1);      // pointing up
+    }
+    Outflow
+    {
+      type inletOutlet;
+      value uniform (35.3 0 0);
+      inletValue uniform (35.3 0 0);
+    }
+    Watersurface
+    {
+      type fixedValue;
+      value uniform (0 0 0);
+    }
+    Ambient
+    {
+      type slip;
+    }
+} 	// ************************************************************************* //
+

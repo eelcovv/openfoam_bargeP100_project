@@ -1,0 +1,79 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| OpenFOAM: The Open Source CFD Toolbox                                      |
+| Version:  2406                                                             |
+| Web:      www.openfoam.com                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSchemes;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+ddtSchemes
+{
+    // Steady SIMPLE
+    default         steadyState;
+}
+
+gradSchemes
+{
+    // No limiter needed on a clean mesh
+    default         Gauss linear;
+    grad(U)         Gauss linear;
+}
+
+divSchemes
+{
+    // Sharper convection for velocity (requires good mesh)
+    div(phi,U)      Gauss linearUpwind grad(U);
+
+    // Less dissipative turbulence transport (still safe on good meshes)
+    // Option A (balanced): limitedLinear 1
+    div(phi,k)      Gauss limitedLinear 1;
+    div(phi,omega)  Gauss limitedLinear 1;
+
+    // If you want maximum sharpness and it remains stable on your case, use:
+    // div(phi,k)      Gauss linearUpwind grad(k);
+    // div(phi,omega)  Gauss linearUpwind grad(omega);
+
+    // SA placeholder (harmless if not used)
+    div(phi,nuTilda) Gauss upwind;
+
+    // Viscous stress (Foundation style)
+    div((nuEff*dev2(T(grad(U)))))  Gauss linear;
+}
+
+laplacianSchemes
+{
+    // Corrected handles mild non-orthogonality without extra dissipation
+    default         Gauss linear corrected;
+}
+
+interpolationSchemes
+{
+    default         linear;
+}
+
+snGradSchemes
+{
+    default         corrected;
+}
+
+// Wall distance method used by SST wall functions
+wallDist
+{
+    method          meshWave;
+}
+
+// Explicit flux writing
+fluxRequired
+{
+    default         no;
+    p;
+}
+
+// ************************************************************************* //
+

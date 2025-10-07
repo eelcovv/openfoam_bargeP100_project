@@ -1,5 +1,8 @@
-
 cases*
-templates
 .vscode
 *.stl
+templates/*/constant/extendedFeatureEdgeMesh
+templates/template*/constant/triSurface/*.eMesh
+.gitignore
+package*.json
+node_modules

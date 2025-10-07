@@ -1,0 +1,32 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | surfaceFeatureExtract                           |
+|  \\    /   O peration     | v2406                                           |
+|   \\  /    A nd           |                                                 |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      surfaceFeatureExtractDict;
+}
+
+hull.stl   // staat in constant/triSurface/
+{
+    extractionMethod    extractFromSurface;
+
+    extractFromSurfaceCoeffs
+    {
+        includedAngle       150;    // graden
+        nonManifoldEdges    yes;
+        openEdges           yes;
+    }
+
+    writeFeatureEdgeMesh    yes;    // .eMesh voor snappyHexMesh
+    writeObj                yes;    // ParaView: .obj van feature edges
+    writeVTK                yes;    // ParaView: .vtk van feature edges
+}
+

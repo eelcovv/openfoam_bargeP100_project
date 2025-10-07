@@ -1,0 +1,28 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2.0.1                                 |
+|   \\  /    A nd           | Web:      www.OpenFOAM.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+controlOnNext
+{
+  type abort;
+  functionObjectLibs ("libjobControl.so" );
+  action nextWrite;
+  fileName "snapshot";
+}
+killNow
+{
+  type abort;
+  functionObjectLibs ( "libjobControl.so" );
+  action noWriteNow;
+  fileName "killrun";
+}
+suspendNow
+{
+  type abort;
+  functionObjectLibs ( "libjobControl.so" );
+  action writeNow;
+  fileName "suspend";
+}

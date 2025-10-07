@@ -1,0 +1,99 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM blockMesh                             |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+// Units: set overall geometric scale (replaces deprecated convertToMeters)
+scale 1;
+
+// Domain vertices (m)
+// Box: [-100,500] × [-200,200] × [0,100]
+// The stern of the barge is at x=0 and the bow at x=100, therefore more space in front of the barge.
+vertices
+(
+    (-200 -200 0)
+    ( 500 -200 0)
+    ( 500  200 0)
+    (-200  200 0)
+    (-200 -200 100)
+    ( 500 -200 100)
+    ( 500  200 100)
+    (-200  200 100)
+);
+
+// One hexahedral block with multi-segment simpleGrading.
+// Goal:
+// - Finer cells near the domain center in X and Y (coarser towards the sides).
+// - Finer cells near the bottom (z=0), coarser towards the top.
+blocks
+(
+    // Base cell counts (keep reasonable; snappyHexMesh will refine near the hull)
+    hex (0 1 2 3 4 5 6 7) (350 200 80)
+    simpleGrading (1 1 1)
+);
+
+edges
+(
+    // none
+);
+
+// Patch naming for boundaries
+boundary
+(
+    Sides
+    {
+        type patch;
+        faces
+        (
+            (1 5 4 0)  // -Y side
+            (3 7 6 2)  // +Y side
+        );
+    }
+
+    Inflow
+    {
+        type patch;
+        faces
+        (
+            (0 4 7 3)  // -X side
+        );
+    }
+
+    Outflow
+    {
+        type patch;
+        faces
+        (
+            (2 6 5 1)  // +X side
+        );
+    }
+
+    Watersurface
+    {
+        // For pure aerodynamics you may consider slip/symmetry here instead of wall
+        type wall;
+        faces
+        (
+            (0 3 2 1)  // bottom (z=0)
+        );
+    }
+
+    Ambient
+    {
+        type patch;
+        faces
+        (
+            (4 5 6 7)  // top (z=250)
+        );
+    }
+);
+
+// ************************************************************************* //
+

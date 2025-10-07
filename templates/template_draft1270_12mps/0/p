@@ -1,0 +1,47 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| Pressure field p (kinematic)                                             |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      p;
+}
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{
+    wall_barge
+    {
+        type zeroGradient;
+    }
+
+    Watersurface
+    {
+        type zeroGradient;
+    }
+
+    Inflow
+    {
+        type zeroGradient;
+    }
+
+    Outflow
+    {
+        type fixedValue;
+        value uniform 0;
+    }
+
+    Sides
+    {
+        type zeroGradient;
+    }
+
+    Ambient
+    {
+        type zeroGradient;
+    }
+}
+

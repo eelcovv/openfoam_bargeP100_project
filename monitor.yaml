@@ -1,0 +1,38 @@
+# YAML configuration for monitor_case.py
+# Each figure lists the data series to plot, from either:
+#   source: solver   → postProcessing/solverInfo/.../solverInfo.dat
+#   source: forces   → postProcessing/forces/.../forces.dat
+# You can use yscale: log for residuals or linear for forces.
+
+figures:
+- title: "Solver residuals - velocity components"
+  yscale: log
+  series:
+  - { source: solver, field: Ux_final, label: "Ux residual" }
+  - { source: solver, field: Uy_final, label: "Uy residual" }
+  - { source: solver, field: Uz_final, label: "Uz residual" }
+
+- title: "Solver residuals - turbulence (k, omega)"
+  yscale: log
+  series:
+  - { source: solver, field: k_final, label: "k residual" }
+  - { source: solver, field: omega_final, label: "omega residual" }
+
+- title: "Solver residuals - pressure"
+  yscale: log
+  series:
+  - { source: solver, field: p_final, label: "p residual" }
+
+- title: "Forces - total (pressure + viscous)"
+  yscale: linear
+  series:
+  - { source: forces, field: total_x, label: "Fx total" }
+  - { source: forces, field: total_y, label: "Fy total" }
+  - { source: forces, field: total_z, label: "Fz total" }
+
+- title: "Moments - total (pressure + viscous)"
+  yscale: linear
+  series:
+  - { source: forces, field: moment_total_x, label: "Mx total" }
+  - { source: forces, field: moment_total_y, label: "My total" }
+  - { source: forces, field: moment_total_z, label: "Mz total" }

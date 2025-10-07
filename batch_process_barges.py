@@ -391,32 +391,59 @@ def prepare_and_mesh_angle(
 # ---------------------------- Start solvers for existing cases ----------------------------
 
 
-def start_solver_for_existing_cases(
+# --- Replace the existing function with this version ---
+def start_solver_for_cases_in_order(
     out_root: Path,
     case_prefix: str,
+    angles: List[float],
     np: int,
     mpirun_cmd: str,
     hostfile: Optional[Path],
     mpirun_extra: str,
+    include_extras: bool = False,
 ) -> None:
-    for sub in sorted(out_root.iterdir()):
-        if not sub.is_dir():
-            continue
-        if not sub.name.startswith(case_prefix):
-            continue
-        if not (sub / "system" / "controlDict").exists():
-            continue
-        app = parse_application(sub)
-        print(f"\n=== Start solver in {sub} (app={app}) ===")
+    """Start solvers in the order given by `angles`. Optionally pick up extra cases afterwards."""
+    started = set()
+
+    # 1) Honor the explicit order from --angles
+    for ang in angles:
+        case_name = make_case_name(case_prefix, ang)
+        case_dir = out_root / case_name
+        if not (case_dir / "system" / "controlDict").exists():
+            continue  # not meshed or missing; skip
+        app = parse_application(case_dir)
+        print(f"\n=== Start solver in {case_dir} (app={app}) ===")
         run_mpi(
             f"{app} -parallel",
-            sub,
+            case_dir,
             mpirun_cmd,
             np,
             hostfile,
             mpirun_extra,
             log_name="log.simpleFoam",
         )
+        started.add(case_dir.resolve())
+
+    # 2) Optionally start any other cases found under out_root (alphabetical)
+    if include_extras:
+        for sub in sorted(out_root.iterdir()):
+            if not sub.is_dir() or not sub.name.startswith(case_prefix):
+                continue
+            if sub.resolve() in started:
+                continue
+            if not (sub / "system" / "controlDict").exists():
+                continue
+            app = parse_application(sub)
+            print(f"\n=== Start solver in {sub} (app={app}) [extra] ===")
+            run_mpi(
+                f"{app} -parallel",
+                sub,
+                mpirun_cmd,
+                np,
+                hostfile,
+                mpirun_extra,
+                log_name="log.simpleFoam",
+            )
 
 
 # ---------------------------- CLI ----------------------------
@@ -486,24 +513,30 @@ def main():
 
     # --- Replace the current --start-existing block in main() with this version ---
     if args.start_existing:
-        # When ensuring meshed: we need a template and angles to prepare missing cases.
-        if args.ensure_meshed:
-            if args.template is None:
-                raise SystemExit("--template is required when using --ensure-meshed.")
-            template = args.template.resolve()
-            # Reuse the same angle parser & prefix to know what should exist
-            angles = parse_angles(args.angles)
-            for ang in angles:
-                case_name = make_case_name(args.case_prefix, ang)
-                case_dir = out_root / case_name
-                # Decide whether this case needs preparation (no system/controlDict or no polyMesh)
-                needs_mesh = not (
-                    case_dir / "system" / "controlDict"
-                ).exists() or not is_meshed(case_dir)
+        # Preserve requested order exactly as given by --angles
+        angles = parse_angles(args.angles)
 
+        if args.ensure_meshed and args.template is None:
+            raise SystemExit("--template is required when using --ensure-meshed.")
+        template = args.template.resolve() if args.template else None
+
+        # Lazy ensure: for each angle, mesh-if-needed then start immediately
+        for ang in angles:
+            case_name = make_case_name(args.case_prefix, ang)
+            case_dir = out_root / case_name
+
+            if args.ensure_meshed:
+                if template is None:
+                    raise SystemExit(
+                        "--template is required when using --ensure-meshed."
+                    )
+                needs_mesh = (
+                    not (case_dir / "system" / "controlDict").exists()
+                    or not (case_dir / "constant" / "polyMesh" / "points").exists()
+                )
                 if needs_mesh:
                     print(
-                        f"\n=== Missing or unmeshed case: {case_name} → preparing/meshing ==="
+                        f"\n=== Missing/unmeshed: {case_name} → preparing/meshing ==="
                     )
                     prepare_and_mesh_angle(
                         template=template,
@@ -517,16 +550,24 @@ def main():
                         case_prefix=args.case_prefix,
                     )
 
-        # After optional prepare/mesh, start solvers for whatever exists under out_root
-        start_solver_for_existing_cases(
-            out_root=out_root,
-            case_prefix=args.case_prefix,
-            np=args.np,
-            mpirun_cmd=args.mpirun,
-            hostfile=args.hostfile.resolve() if args.hostfile else None,
-            mpirun_extra=args.mpirun_extra.strip(),
-        )
-        print("\nAll existing cases started.")
+            # If the case exists now, start its solver immediately
+            if (case_dir / "system" / "controlDict").exists():
+                app = parse_application(case_dir)
+                print(f"\n=== Start solver in {case_dir} (app={app}) ===")
+                run_mpi(
+                    f"{app} -parallel",
+                    case_dir,
+                    args.mpirun,
+                    args.np,
+                    args.hostfile,
+                    args.mpirun_extra.strip(),
+                    log_name="log.simpleFoam",
+                )
+            else:
+                # Optional: warn if a case still doesn't exist and we weren't allowed to mesh
+                print(f"[WARN] Case not found and not meshed: {case_dir}")
+
+        print("\nAll requested cases processed in angles order.")
         return
 
     if args.template is None:

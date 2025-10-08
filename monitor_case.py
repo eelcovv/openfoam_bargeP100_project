@@ -10,6 +10,8 @@ YAML schema (minimal):
 figures:
   - title: <figure title>
     yscale: log | linear           # optional (default: linear)
+            xlim: [min,max]        # optional (default: None)
+            ylim: [min,max]        # optional (default: None)
     series:
       - source: solver | forces    # required
         field:  <column or key>    # e.g. 'p_final', 'Ux_final', 'total_x'
@@ -30,20 +32,21 @@ Notes:
 
 from __future__ import annotations
 
+import argparse
+import math
+import numpy as np
+import re
+import sys
+import threading
 import time
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-import threading
-import argparse
-import re
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import yaml
-import pandas as pd
 import matplotlib.pyplot as plt
-
+import pandas as pd
+import yaml
 
 # --------------------------- Filesystem helpers -----------------------------
 
@@ -75,7 +78,6 @@ def load_solverinfo(case_dir: Path) -> Optional[pd.DataFrame]:
     if fpath is None or not fpath.is_file():
         return None
 
-    times: List[float] = []
     rows: List[List[float]] = []
     header_cols: List[str] = []
 
@@ -368,6 +370,124 @@ def sanitize_filename(name: str) -> str:
     return safe[:120] if len(safe) > 120 else safe
 
 
+def resolve_limits_from_data(
+    limits: Optional[list[float]],
+    data: Optional[pd.DataFrame],
+    xcol: str = "time",
+) -> Optional[tuple[float | None, float | None]]:
+    """Convert [min,max] where None means use data min/max."""
+    if limits is None:
+        return None
+    if len(limits) != 2:
+        raise ValueError("Limits must be a list of two numbers [min, max]")
+    lo, hi = limits
+    if data is not None and xcol in data.columns:
+        xmin, xmax = float(data[xcol].min()), float(data[xcol].max())
+        if lo in (None, "None"):
+            lo = xmin
+        if hi in (None, "None"):
+            hi = xmax
+    return (
+        float(lo) if lo is not None else None,
+        float(hi) if hi is not None else None,
+    )
+
+
+def _series_xy(
+    s: dict,
+    solver_df: Optional[pd.DataFrame],
+    forces_df: Optional[pd.DataFrame],
+) -> Optional[tuple[pd.Series, pd.Series]]:
+    source = str(s.get("source", "")).lower()
+    field = str(s.get("field", ""))
+    if source == "solver":
+        if solver_df is None:
+            return None
+        if field == "U_final":
+            comps = [
+                c
+                for c in ("Ux_final", "Uy_final", "Uz_final")
+                if c in solver_df.columns
+            ]
+            if not comps:
+                return None
+            y = solver_df[comps[0]] ** 2
+            for c in comps[1:]:
+                y = y + solver_df[c] ** 2
+            y = y.pow(0.5)
+            return solver_df["time"], y
+        if field not in solver_df.columns:
+            return None
+        return solver_df["time"], solver_df[field]
+
+    if source == "forces":
+        if forces_df is None or field not in forces_df.columns:
+            return None
+        return forces_df["time"], forces_df[field]
+
+    return None
+
+
+def compute_ylim_from_series(
+    fig_cfg: dict,
+    solver_df: Optional[pd.DataFrame],
+    forces_df: Optional[pd.DataFrame],
+    xlim_tuple: Optional[tuple[float | None, float | None]],
+    yscale: str = "linear",
+) -> Optional[tuple[float, float]]:
+    ymins: list[float] = []
+    ymaxs: list[float] = []
+    series = fig_cfg.get("series", []) or []
+    if not series:
+        return None
+
+    xlo, xhi = (None, None) if not xlim_tuple else xlim_tuple
+
+    for s in series:
+        xy = _series_xy(s, solver_df, forces_df)
+        if xy is None:
+            continue
+        t, y = xy
+
+        mask = pd.Series(True, index=t.index)
+        if xlo is not None:
+            mask &= t >= xlo
+        if xhi is not None:
+            mask &= t <= xhi
+
+        ysel = y[mask].replace([np.inf, -np.inf], np.nan).dropna()
+        if yscale == "log":
+            ysel = ysel[ysel > 0]
+
+        if not ysel.empty:
+            ymins.append(float(ysel.min()))
+            ymaxs.append(float(ysel.max()))
+
+    if not ymins:
+        return None
+
+    ymin, ymax = min(ymins), max(ymaxs)
+
+    if not math.isfinite(ymin) or not math.isfinite(ymax):
+        return None
+    if ymin == ymax:
+        if yscale == "log":
+            ymin, ymax = ymin / 10.0, ymax * 10.0
+        else:
+            eps = 1e-12 if ymin == 0 else abs(ymin) * 0.05
+            ymin, ymax = ymin - eps, ymax + eps
+    else:
+        if yscale == "log":
+            ymin, ymax = ymin / 1.2, ymax * 1.2
+            if ymin <= 0:
+                ymin = min(v for v in ymins if v > 0) / 1.2
+        else:
+            span = ymax - ymin
+            ymin, ymax = ymin - 0.05 * span, ymax + 0.05 * span
+
+    return ymin, ymax
+
+
 def plot_figures(
     case_dir: Path, cfg: Dict, out_dir: Path, show: bool, live: bool = False
 ) -> int:
@@ -393,11 +513,36 @@ def plot_figures(
             print(f"Skipping figure '{title}': no 'series' list.", file=sys.stderr)
             continue
 
+        data_df = forces_df if forces_df is not None else solver_df
+        xlim = resolve_limits_from_data(fig.get("xlim"), data_df)
+
         plt.figure()
         ax = plt.gca()
         ax.set_title(title)
         ax.set_xlabel("time [s]")
         ax.set_yscale(yscale if yscale in ("linear", "log", "symlog") else "linear")
+
+        if xlim:
+            ax.set_xlim(xlim)
+
+        y_auto = compute_ylim_from_series(
+            fig, solver_df, forces_df, xlim, yscale=yscale
+        )
+        ylim_cfg = fig.get("ylim")
+        if isinstance(ylim_cfg, list) and len(ylim_cfg) == 2:
+            lo, hi = ylim_cfg
+            if (lo in (None, "None")) and y_auto:
+                lo = y_auto[0]
+            if (hi in (None, "None")) and y_auto:
+                hi = y_auto[1]
+            ylim = (
+                (float(lo), float(hi)) if (lo is not None and hi is not None) else None
+            )
+        else:
+            ylim = y_auto
+
+        if ylim:
+            ax.set_ylim(ylim)
 
         any_plotted = False
 
@@ -563,6 +708,7 @@ def live_watch(
     case_dir: Path,
     cfg: dict,
     out_dir: Path,
+    cfg_path: Path,
     show: bool,
     interval: float,
     serve_port: int | None,
@@ -585,6 +731,8 @@ def live_watch(
         while True:
             sig = mtime_signature(targets)
             if sig != prev_sig:
+                with cfg_path.open("r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
                 prev_sig = sig
                 n = plot_figures(case_dir, cfg, out_dir, show=show)
                 if serve_port is not None:
@@ -593,6 +741,8 @@ def live_watch(
                     print("[watch] No figures produced (yet).")
                 else:
                     print(f"[watch] Updated {n} figure(s).")
+                with cfg_path.open("r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nStopped.")
@@ -665,6 +815,7 @@ def main() -> int:
             case_dir,
             cfg,
             out_dir,
+            cfg_path=cfg_path,
             show=bool(args.show),
             interval=(args.watch or 2.0),
             serve_port=args.serve,

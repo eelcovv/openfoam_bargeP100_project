@@ -9,3 +9,8 @@ dependencies = [
     "pandas>=2.3.3",
     "pyyaml>=6.0.3",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.0",
+]

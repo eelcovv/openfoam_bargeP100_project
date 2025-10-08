@@ -31,6 +31,7 @@ Notes:
 from __future__ import annotations
 
 import time
+import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import argparse
@@ -367,7 +368,9 @@ def sanitize_filename(name: str) -> str:
     return safe[:120] if len(safe) > 120 else safe
 
 
-def plot_figures(case_dir: Path, cfg: Dict, out_dir: Path, show: bool) -> int:
+def plot_figures(
+    case_dir: Path, cfg: Dict, out_dir: Path, show: bool, live: bool = False
+) -> int:
     """
     Render all figures from YAML config. Returns number of figures plotted.
     """
@@ -469,11 +472,22 @@ def plot_figures(case_dir: Path, cfg: Dict, out_dir: Path, show: bool) -> int:
         out_path = out_dir / fname
         plt.tight_layout()
         plt.savefig(out_path, dpi=120)
-        if show:
-            plt.show()
+
+        if live and show:
+            # Interactieve/non-blocking update
+            plt.ion()
+            try:
+                plt.show(block=False)
+            except TypeError:
+                # Oudere Matplotlibs zonder block-arg
+                plt.show()
+            plt.pause(0.001)  # event loop laten ademen
+            # NIET sluiten bij live-mode
         else:
+            if show:
+                plt.show()
             plt.close()
-        print(f"Wrote {out_path}")
+
         plotted += 1
 
     return plotted
@@ -561,6 +575,10 @@ def live_watch(
     if serve_port is not None:
         write_autoindex(out_dir)
         httpd = run_http_server(out_dir, serve_port)
+        try:
+            webbrowser.open_new_tab(f"http://localhost:{serve_port}/")
+        except Exception:
+            pass
 
     print(f"Watching {case_dir} every {interval}s. Press Ctrl+C to stop.")
     try:
@@ -653,7 +671,7 @@ def main() -> int:
         )
         return 0
     else:
-        n = plot_figures(case_dir, cfg, out_dir, show=args.show)
+        n = plot_figures(case_dir, cfg, out_dir, show=args.show, live=False)
         return 0 if n > 0 else 1
 
 

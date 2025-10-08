@@ -616,6 +616,7 @@ def plot_figures(
         fname = sanitize_filename(title) + ".png"
         out_path = out_dir / fname
         plt.tight_layout()
+        print("Saving figure:", out_path)
         plt.savefig(out_path, dpi=120)
 
         if live and show:
@@ -714,9 +715,13 @@ def live_watch(
     serve_port: int | None,
 ):
     targets = collect_targets(case_dir)
-    if not targets:
-        print("No postProcessing files found to watch.", file=sys.stderr)
-    prev_sig = -1.0
+
+    def files_sig(paths: list[Path]) -> float:
+        return mtime_signature(paths) if paths else 0.0
+
+    prev_data_sig = -1.0
+    prev_cfg_mtime = -1.0
+
     httpd = None
     if serve_port is not None:
         write_autoindex(out_dir)
@@ -729,20 +734,34 @@ def live_watch(
     print(f"Watching {case_dir} every {interval}s. Press Ctrl+C to stop.")
     try:
         while True:
-            sig = mtime_signature(targets)
-            if sig != prev_sig:
-                with cfg_path.open("r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                prev_sig = sig
+            # 1) check data changes
+            data_sig = files_sig(targets)
+
+            # 2) check config changes
+            try:
+                cfg_mtime = cfg_path.stat().st_mtime
+            except FileNotFoundError:
+                cfg_mtime = -1.0
+
+            # 3) trigger if either changed
+            if (data_sig != prev_data_sig) or (cfg_mtime != prev_cfg_mtime):
+                # (re)load config only if it changed
+                if cfg_mtime != prev_cfg_mtime and cfg_mtime >= 0:
+                    with cfg_path.open("r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+
+                prev_data_sig = data_sig
+                prev_cfg_mtime = cfg_mtime
+
                 n = plot_figures(case_dir, cfg, out_dir, show=show)
                 if serve_port is not None:
                     write_autoindex(out_dir)
-                if n == 0:
-                    print("[watch] No figures produced (yet).")
-                else:
-                    print(f"[watch] Updated {n} figure(s).")
-                with cfg_path.open("r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
+                print(
+                    f"[watch] Updated {n} figure(s)."
+                    if n
+                    else "[watch] No figures produced (yet)."
+                )
+
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nStopped.")
